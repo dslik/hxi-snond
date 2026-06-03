@@ -16,6 +16,7 @@
 #include <limits.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <getopt.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -26,13 +27,16 @@
 // Local includes
 #include "cJSON.h"
 
+// Defines
+#define ISO8601_LEN     28
+
 // Prototypes
 int hxi_read_power(int dev_fd, uint8_t rail, double* wattage);
 int hxi_select_rail(int dev_fd, uint8_t rail);
 double reg_to_value(uint16_t reg);
 bool is_valid_uuid(char* uuid_value);
 int generate_random_uuid(char* uuid_value);
-
+char* iso8601_time(char* buf, size_t len);
 
 // Global Variables
 const char* usage = "Usage: hxi-snond [options]\n"
@@ -45,7 +49,7 @@ const char* usage = "Usage: hxi-snond [options]\n"
                     "  -h          Show this help message\n";
 
 
-int main(int argc, char *argv[])
+int main(int argc, char* argv[])
 {
     int                     opt = 0;
     const char*             device_name = "/dev/hidraw0";
@@ -169,11 +173,12 @@ int main(int argc, char *argv[])
 
     // ===========================================================
     // Create SNON sensor record if it does not exist
-    if(0 >= access(output_path, R_OK | W_OK))
+    snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, uuid_value);
+
+    if(0 != access(snon_path, R_OK | W_OK))
     {
         // Open the SNON sensor object
-        snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, uuid_value);
-        snon_fd = open(snon_path, O_RDWR | O_CREAT);
+        snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
 
         // Create a new sensor record
         snon_root = cJSON_CreateObject();
@@ -186,25 +191,53 @@ int main(int argc, char *argv[])
         {
             fprintf(stderr,"Error writing SNON sensor record\n");
             perror("SNON Write");
-            return -1;
+            return EXIT_FAILURE;
         }
 
+        cJSON_free(snon_output);
+        cJSON_Delete(snon_root);
         close(snon_fd);
     }
 
     // ===========================================================
     // Obtain HXi Power Supply Information
-    if(-1 == hxi_read_power(dev_fd, 0, &wattage))
+    iso8601_time(working_string, sizeof(working_string));
+    snprintf(snon_path, sizeof(snon_path), "%s%s-%s.json", output_path, uuid_value, working_string);
+
+    if(0 != access(snon_path, R_OK | W_OK))
     {
-        fprintf(stderr,"Error reading wattage value\n");
-        return EXIT_FAILURE;
+        // Open the SNON sensor object
+        snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+
+        if(-1 == hxi_read_power(dev_fd, 0, &wattage))
+        {
+            fprintf(stderr,"Error reading wattage value\n");
+            return EXIT_FAILURE;
+        }
+
+        // Create a new sensor record
+        snon_root = cJSON_CreateObject();
+        snprintf(working_string, sizeof(working_string), "urn:uuid:%s", uuid_value);
+        cJSON_AddItemToObjectCS(snon_root, "n", cJSON_CreateString(working_string));
+        snprintf(working_string, sizeof(working_string), "%g", wattage);
+        cJSON_AddItemToObjectCS(snon_root, "v", cJSON_CreateString(working_string));
+        iso8601_time(working_string, sizeof(working_string));
+        cJSON_AddItemToObjectCS(snon_root, "t", cJSON_CreateString(working_string));
+        snon_output = cJSON_PrintUnformatted(snon_root);
+
+        if(strlen(snon_output) != write(snon_fd, snon_output, strlen(snon_output)))
+        {
+            fprintf(stderr,"Error writing SNON value record\n");
+            perror("SNON Write");
+            return EXIT_FAILURE;
+        }
+
+        cJSON_free(snon_output);
+        cJSON_Delete(snon_root);
+        close(snon_fd);
     }
 
-    // Test printing out wattage, replace with SNON code
-    printf("Wattage %g\n", wattage);
-
     close(dev_fd);
-
     return EXIT_SUCCESS;
 }
 
@@ -359,7 +392,7 @@ int generate_random_uuid(char* uuid_value)
 
     urandom_fd = open("/dev/urandom", O_RDONLY);
 
-    if(0 >= urandom_fd)
+    if(-1 == urandom_fd)
     {
         fprintf(stderr,"Unable to open /dev/urandom for UUID generation\n");
         perror("/dev/urandom");
@@ -389,4 +422,38 @@ int generate_random_uuid(char* uuid_value)
         uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]);
 
     return 0;
+}
+
+
+// Populates the buffer with the current ISO 8601 UTC date/time in microseconds
+char* iso8601_time(char* buf, size_t len)
+{
+    struct timespec     ts;
+    struct tm           t;
+
+    if(buf == NULL || len < ISO8601_LEN)
+    {
+        return NULL;
+    }
+
+    if(0 != clock_gettime(CLOCK_REALTIME, &ts))
+    {
+        return NULL;
+    }
+
+    if(NULL == gmtime_r(&ts.tv_sec, &t))
+    {
+        return NULL;
+    }
+
+    snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02d.%06ldZ",
+        t.tm_year + 1900,
+        t.tm_mon  + 1,
+        t.tm_mday,
+        t.tm_hour,
+        t.tm_min,
+        t.tm_sec,
+        (long)(ts.tv_nsec / 1000L));
+
+    return buf;
 }
