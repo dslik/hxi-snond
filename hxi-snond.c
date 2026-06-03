@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <ctype.h>
+#include <limits.h>
 #include <string.h>
 #include <unistd.h>
 #include <getopt.h>
@@ -21,6 +22,9 @@
 
 // Linux includes
 #include <linux/hidraw.h>
+
+// Local includes
+#include "cJSON.h"
 
 // Prototypes
 int hxi_read_power(int dev_fd, uint8_t rail, double* wattage);
@@ -50,14 +54,19 @@ int main(int argc, char *argv[])
     const char*             uuid_arg = NULL;
     char                    uuid_value[37];
     int                     dev_fd = 0;
+    char                    snon_path[PATH_MAX];
+    int                     snon_fd = 0;
     struct hidraw_devinfo   hid_info;
     double                  wattage = 0;
     double                  frequency = 0;
+    cJSON*                  snon_root = NULL;
+    char*                   snon_output = NULL;
+    char                    working_string[1024];
 
     // Obtain command line arguments
     while(-1 != opt)
     {
-        opt = getopt(argc, argv, "d:o:h");
+        opt = getopt(argc, argv, "d:o:f:u:h");
 
         switch(opt)
         {
@@ -156,6 +165,31 @@ int main(int argc, char *argv[])
     {
         fprintf(stderr,"Unexpected HID product '0x%04x' (expected 0x1c1e)\n", hid_info.product);
         return EXIT_FAILURE;
+    }
+
+    // ===========================================================
+    // Create SNON sensor record if it does not exist
+    if(0 >= access(output_path, R_OK | W_OK))
+    {
+        // Open the SNON sensor object
+        snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, uuid_value);
+        snon_fd = open(snon_path, O_RDWR | O_CREAT);
+
+        // Create a new sensor record
+        snon_root = cJSON_CreateObject();
+        snprintf(working_string, sizeof(working_string), "urn:uuid:%s", uuid_value);
+        cJSON_AddItemToObjectCS(snon_root, "eID", cJSON_CreateString(working_string));
+        cJSON_AddItemToObjectCS(snon_root, "eC", cJSON_CreateString("sensor"));
+        snon_output = cJSON_PrintUnformatted(snon_root);
+
+        if(strlen(snon_output) != write(snon_fd, snon_output, strlen(snon_output)))
+        {
+            fprintf(stderr,"Error writing SNON sensor record\n");
+            perror("SNON Write");
+            return -1;
+        }
+
+        close(snon_fd);
     }
 
     // ===========================================================
