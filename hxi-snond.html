@@ -1,0 +1,991 @@
+//#<!DOCTYPE html><html><title>HXi Power Supply Sensor Daemon</title><xmp theme="united" style="display:none;">
+    // ---------------------------------------------------------------------------------
+    // HXi Power Supply Sensor Daemon
+    // ---------------------------------------------------------------------------------
+    // Polls and writes out sensor data from HXi power supplies.
+    // Sensor data is written in SNON 4 format.
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/hxi-snond/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <stdint.h>
+    #include <stdbool.h>
+    #include <ctype.h>
+    #include <limits.h>
+    #include <string.h>
+    #include <unistd.h>
+    #include <time.h>
+    #include <getopt.h>
+    #include <fcntl.h>
+    #include <signal.h>
+    #include <unistd.h>
+    #include <sys/ioctl.h>
+    #include <sys/stat.h>
+
+    // Linux includes
+    #include <linux/hidraw.h>
+
+    // Local includes
+    #include "cJSON.h"
+
+    // Defines
+    #define ISO8601_LEN     28
+
+    // Prototypes
+    cJSON* json_read_file(char* json_file_path);
+    void snon_addname(cJSON* snon_object, char* field, char* lang, char* name);
+    uint32_t hxi_collect_values(char* snon_path, int dev_fd, char* uuid_value);
+    uint32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage);
+    uint32_t hxi_select_rail(int dev_fd, uint8_t rail);
+    double reg_to_value(uint16_t reg);
+    bool is_valid_uuid(char* uuid_value);
+    uint32_t generate_random_uuid(char* uuid_value);
+    char* iso8601_time(char* buf, size_t len);
+    static void signal_handler(int signum);
+
+
+    // Global Variables
+    const char* g_usage = "Usage: hxi-snond [options]\n"
+                          "\n"
+                          "Options:\n"
+                          "  -d DEVICE   Hidraw device path (default: /dev/hidraw0)\n"
+                          "  -o OUTPUT   Location to write SNON files (default: current working directory)\n"
+                          "  -c CONFIG   JSON Configuration file that specifies which sensors to read\n"
+                          "  -u UUID     Device UUID (default: randomly generated)\n"
+                          "  -h          Show this help message\n";
+
+    static volatile sig_atomic_t g_abort_collect = false;
+
+/*
+HXi sensor daemon entry point
+------------------------------
+
+Parses command-line arguments, opens and validates the HXi HID power
+supply device, creates initial SNON device and sensor records on first
+run, then delegates continuous sensor value collection to
+`hxi_collect_values`.
+
+The daemon runs until it receives a SIGINT signal, at which point the
+signal handler sets `g_abort_collect` and the collection loop exits
+cleanly on its next polling iteration.
+
+Interactions
+------------
+
+| Parameter       | Direction | Type         | Description                                                                                         |
+| --------------- | --------- | ------------ | --------------------------------------------------------------------------------------------------- |
+| argc            | in        | int          | POSIX count of command-line arguments; always >= 1                                                  |
+| argv            | in        | char*[]      | POSIX argument vector; argv[0] is the program name                                                  |
+| return value    | out       | int          | EXIT_SUCCESS (0) on clean exit; EXIT_FAILURE (1) on any error                                       |
+| g_abort_collect | shared    | sig_atomic_t | Global flag; read via hxi_collect_values; written true by signal_handler on SIGINT                  |
+
+Other changes to system state include:
+
+- May create up to two new JSON files in the output directory (device record and sensor record).
+- May create one new subdirectory in the output directory (sensor value directory).
+- Opens and closes a file descriptor for the HID raw device specified by -d.
+- Reads the JSON configuration file from the path specified by -c.
+
+*/
+
+    int main(int argc, char* argv[])
+    {
+        int                     opt = 0;
+        const char*             device_name = "/dev/hidraw0";
+        const char*             output_path = "./";
+        const char*             config_path = "./sensors.json";
+        const char*             uuid_arg = NULL;
+        char                    device_uuid[37];
+        char                    sensor_uuid[37];
+        int                     dev_fd = 0;
+        char                    snon_path[PATH_MAX];
+        int                     snon_fd = 0;
+        struct hidraw_devinfo   hid_info;
+        cJSON*                  config_json = NULL;
+        cJSON*                  snon_root = NULL;
+        cJSON*                  relation_object = NULL;
+        cJSON*                  relation_array = NULL;
+        char*                   snon_output = NULL;
+        char                    working_string[1024];
+
+        // Obtain command line arguments
+        while(-1 != opt)
+        {
+            opt = getopt(argc, argv, "d:o:c:u:h");
+
+            switch(opt)
+            {
+                case 'd':
+                    device_name = optarg;
+                    break;
+                case 'o':
+                    output_path = optarg;
+                    break;
+                case 'c':
+                    config_path = optarg;
+                    break;
+                case 'u':
+                    uuid_arg = optarg;
+                    break;
+                case 'h':
+                    fprintf(stdout, "%s", g_usage);
+                    return EXIT_SUCCESS;
+                case '?':
+                    fprintf(stderr, "%s", g_usage);
+                    return EXIT_FAILURE;
+            }
+        }
+
+        // ===========================================================
+        // Validate Inputs
+        if(0 != access(device_name, R_OK | W_OK))
+        {
+            fprintf(stderr,"Error accessing specified hid device: %s\n", device_name);
+            perror(device_name);
+            return(EXIT_FAILURE);
+        }
+
+        if(0 != access(output_path, R_OK | W_OK))
+        {
+            fprintf(stderr,"Error accessing specified output directory: %s\n", output_path);
+            perror(output_path);
+            return(EXIT_FAILURE);
+        }
+
+        if(0 != access(config_path, R_OK))
+        {
+            fprintf(stderr,"Error accessing specified config file: %s\n", config_path);
+            perror(config_path);
+            return(EXIT_FAILURE);
+        }
+
+        // Ensure that the output directory ends with a "/"
+        if('/' != output_path[strlen(output_path) - 1])
+        {
+            fprintf(stderr,"Specified output directory does not end with a '/': %s\n", output_path);
+            return(EXIT_FAILURE);
+        }
+
+        // Validate or generate UUID
+        if(NULL != uuid_arg)
+        {
+            if(false == is_valid_uuid((char*) uuid_arg))
+            {
+                fprintf(stderr,"Invalid UUID format: %s\n", uuid_arg);
+                return(EXIT_FAILURE);
+            }
+
+            memcpy(device_uuid, uuid_arg, sizeof(device_uuid));
+        }
+        else
+        {
+            if(-1 == generate_random_uuid(device_uuid))
+            {
+                fprintf(stderr,"Error generating random UUID\n");
+                return(EXIT_FAILURE);
+            }
+        }
+
+        // ===========================================================
+        // Initialize a connecion to the HXi Power Supply
+        dev_fd = open(device_name, O_RDWR);
+
+        memset(&hid_info, 0, sizeof(hid_info));
+        if(0 != ioctl(dev_fd, HIDIOCGRAWINFO, &hid_info))
+        {
+            fprintf(stderr,"Specified path '%s' is not a HID device.\n", device_name);
+            perror(device_name);
+            return(EXIT_FAILURE);
+        }
+          
+        if(0x1b1c != hid_info.vendor)
+        {
+            fprintf(stderr,"Unexpected HID vendor '0x%04x' (expected 0x1b1c)\n", hid_info.vendor);
+            return(EXIT_FAILURE);
+        }
+
+        if(0x1c1e != hid_info.product)
+        {
+            fprintf(stderr,"Unexpected HID product '0x%04x' (expected 0x1c1e)\n", hid_info.product);
+            return(EXIT_FAILURE);
+        }
+
+        // ===========================================================
+        // Read a configuration JSON file that specifies which sensors
+        // should be collected
+        config_json = json_read_file((char*) config_path);
+
+      
+
+
+        // ===========================================================
+        // Create SNON device and sensor records if they do not exist
+        snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, device_uuid);
+
+        if(0 != access(snon_path, R_OK | W_OK))
+        {
+            // Create a new SNON device object
+            snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+
+            // Create a new device record
+            snon_root = cJSON_CreateObject();
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
+            cJSON_AddItemToObjectCS(snon_root, "eID", cJSON_CreateString(working_string));
+            cJSON_AddItemToObjectCS(snon_root, "eC", cJSON_CreateString("device"));
+            snon_addname(snon_root, "eN", "*", "HX1000i Power Supply");
+            snon_output = cJSON_PrintUnformatted(snon_root);
+
+            if(strlen(snon_output) != write(snon_fd, snon_output, strlen(snon_output)))
+            {
+                fprintf(stderr,"Error writing SNON device record\n");
+                perror("write");
+                return(EXIT_FAILURE);
+            }
+
+            cJSON_free(snon_output);
+            cJSON_Delete(snon_root);
+            close(snon_fd);
+
+            // Create a new SNON sensor object
+            if(-1 == generate_random_uuid(sensor_uuid))
+            {
+                fprintf(stderr,"Error generating random UUID\n");
+                return(EXIT_FAILURE);
+            }
+
+            snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, sensor_uuid);
+            snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+
+            // Create a new sensor record
+            snon_root = cJSON_CreateObject();
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", sensor_uuid);
+            cJSON_AddItemToObjectCS(snon_root, "eID", cJSON_CreateString(working_string));
+            cJSON_AddItemToObjectCS(snon_root, "eC", cJSON_CreateString("sensor"));
+            snon_addname(snon_root, "eN", "*", "3.3V Rail Power");
+
+            relation_array = cJSON_CreateArray();
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
+            cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+
+            relation_object = cJSON_CreateObject();
+            cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
+            cJSON_AddItemToObjectCS(snon_root, "eR", relation_object);
+            snon_output = cJSON_PrintUnformatted(snon_root);
+
+            if(strlen(snon_output) != write(snon_fd, snon_output, strlen(snon_output)))
+            {
+                fprintf(stderr,"Error writing SNON sensor record\n");
+                perror("write");
+                return(EXIT_FAILURE);
+            }
+
+            // Create sensor directory
+            snprintf(snon_path, sizeof(snon_path), "%s/%s", output_path, sensor_uuid);
+            if(-1 == mkdir(snon_path, S_IRWXU))
+            {
+                fprintf(stderr,"Error creating sensor directory\n");
+                perror("mkdir");
+                return(EXIT_FAILURE);
+            }
+
+            cJSON_free(snon_output);
+            cJSON_Delete(snon_root);
+            close(snon_fd);
+        }
+
+        // ===========================================================
+        // Obtain HXi Power Supply Information
+        
+        iso8601_time(working_string, sizeof(working_string));
+        snprintf(snon_path, sizeof(snon_path), "%s/%s/%s-%s.json", output_path, sensor_uuid, sensor_uuid, working_string);
+
+        if(-1 == hxi_collect_values(snon_path, dev_fd, sensor_uuid))
+        {
+            fprintf(stderr,"Error writing SNON value record\n");
+            return(EXIT_FAILURE);
+        }
+
+        close(dev_fd);
+        return(EXIT_SUCCESS);
+    }
+
+/*
+Add a localised name entry to a SNON object
+--------------------------------------------
+
+Creates a child JSON object containing a single language-keyed string
+entry and attaches it to the parent SNON object under the given field
+key. Used to populate the `eN` (entity name) field in SNON records,
+following the SNON 4 name format where the field value is itself a JSON
+object mapping language tags to name strings.
+
+Interactions
+------------
+
+| Parameter   | Direction | Type   | Description                                                        |
+| ----------- | --------- | ------ | ------------------------------------------------------------------ |
+| snon_object | in/out    | cJSON* | Parent SNON JSON object; the named field is added in place         |
+| field       | in        | char*  | JSON key under which the name sub-object is inserted (e.g. "eN")  |
+| lang        | in        | char*  | BCP-47 language tag for the name entry; use "*" as the default     |
+| name        | in        | char*  | Human-readable name string; stored as a JSON string value          |
+
+Other changes to system state include:
+
+- Allocates heap memory via cJSON for the child name object. This memory is owned
+  by snon_object and freed when cJSON_Delete(snon_object) is called by the caller.
+
+*/
+
+    void snon_addname(cJSON* snon_object, char* field, char* lang, char* name)
+    {
+        cJSON*  name_object = NULL;
+
+        name_object = cJSON_CreateObject();
+        cJSON_AddItemToObjectCS(name_object, lang, cJSON_CreateString(name));
+        cJSON_AddItemToObjectCS(snon_object, field, name_object);
+    }
+
+/*
+Read and parse a JSON file from disk
+-------------------------------------
+
+Opens the file at json_file_path, allocates a heap buffer sized to the
+file contents, reads the entire file into the buffer, null-terminates
+it, and parses the result as JSON using cJSON. Returns the resulting
+cJSON object on success or NULL on any I/O or parse failure.
+
+Ownership of the returned cJSON object passes to the caller, who must
+free it by calling cJSON_Delete.
+
+Interactions
+------------
+
+| Parameter      | Direction | Type   | Description                                                   |
+| -------------- | --------- | ------ | ------------------------------------------------------------- |
+| json_file_path | in        | char*  | Null-terminated filesystem path to the JSON file to read      |
+| return value   | out       | cJSON* | Heap-allocated parsed JSON object on success; NULL on failure  |
+
+Other changes to system state include:
+
+- Opens and closes a file descriptor for json_file_path.
+- Allocates and frees a temporary heap buffer sized to the file contents.
+- The returned cJSON* is heap-allocated; caller must call cJSON_Delete on it.
+- Writes diagnostic messages to stderr on I/O or parse failure.
+
+*/
+
+    cJSON* json_read_file(char* json_file_path)
+    {
+        int             json_file = -1;
+        struct stat     st;
+        off_t           length = 0;
+        char*           read_buffer = NULL;
+        ssize_t         bytes_read = 0;
+        cJSON*          json_contents = NULL;
+        const char*     error_ptr = NULL;
+
+        json_file = open(json_file_path, O_RDONLY);
+        if(json_file == -1)
+        {
+            fprintf(stderr,"Unable to open JSON file '%s'.\n", json_file_path);
+            return(NULL);
+        }
+
+        // Get file size
+        if(-1 == fstat(json_file, &st))
+        {
+            fprintf(stderr,"Unable to get size of JSON file '%s'.\n", json_file_path);
+            close(json_file);
+            return(NULL);
+        }
+        
+        length = st.st_size;
+
+        // Allocate memory to read file
+        read_buffer = (char*) malloc(length + 1);
+        if(NULL == read_buffer)
+        {
+            fprintf(stderr,"Unable to allocate %ld bytes of memory to read JSON file.\n", length);
+            close(json_file);
+            return(NULL);
+        }
+
+        // Read the file's contents
+        bytes_read = read(json_file, read_buffer, length);
+        close(json_file);
+
+        if(bytes_read != length)
+        {
+            fprintf(stderr,"Unable to read file, expected %ld bytes, got %ld bytes.\n", length, bytes_read);
+            free(read_buffer);
+            return(NULL);
+        }
+
+        read_buffer[length] = '\0';
+
+        // Parse the contents of the file
+        json_contents = cJSON_Parse(read_buffer);
+        free(read_buffer);
+
+        if(NULL == json_contents)
+        {
+            error_ptr = cJSON_GetErrorPtr();
+            fprintf(stderr, "Error parsing JSON at: %s\n", error_ptr);
+            return(NULL);
+        }
+
+        return(json_contents);
+    }
+
+/*
+Collect HXi power values and write a SNON SenML record
+-------------------------------------------------------
+
+Installs a SIGINT signal handler, creates a new SenML value record file
+at snon_path, then enters a polling loop. Each iteration reads the
+current 3.3 V rail power wattage from the HXi device, timestamps the
+reading using iso8601_time, and appends a SenML entry object to an
+in-memory cJSON array. The loop sleeps 100 ms between readings.
+
+The loop continues until g_abort_collect is set true by signal_handler.
+On exit, the completed SenML array is serialised and written to the file.
+
+Interactions
+------------
+
+| Parameter       | Direction | Type         | Description                                                               |
+| --------------- | --------- | ------------ | ------------------------------------------------------------------------- |
+| snon_path       | in        | char*        | Filesystem path at which the output SNON value record file is created     |
+| dev_fd          | in        | int          | Open file descriptor for the HID raw device                               |
+| uuid_value      | in        | char*        | 36-character null-terminated RFC 4122 UUID for the SenML base name field  |
+| return value    | out       | int          | 0 on success; -1 on any I/O or device error                               |
+| g_abort_collect | shared    | sig_atomic_t | Global flag; polled each loop iteration; written true by signal_handler   |
+
+Other changes to system state include:
+
+- Installs signal_handler as the SIGINT action via sigaction with SA_RESTART.
+- Creates and writes a new regular file at snon_path.
+- Calls usleep(100000) between iterations, suspending the process for ~100 ms.
+- Writes diagnostic messages to stderr on failure.
+
+*/
+
+    uint32_t hxi_collect_values(char* snon_path, int dev_fd, char* uuid_value)
+    {
+        double              wattage = 0.0;
+        int                 snon_fd = -1;
+        char*               snon_output;
+        char                working_string[64] = {0};
+        struct sigaction    signal_action = {0};
+        bool                first_record = true;
+        cJSON*              senml_array = NULL;
+        cJSON*              entry = NULL;
+        size_t              data_len = 0U;
+        ssize_t             data_written_len = 0;
+
+        if (0 != access(snon_path, R_OK | W_OK))
+        {
+            // Set up a signal handler to end data collection
+            signal_action.sa_handler = signal_handler;
+            signal_action.sa_flags = SA_RESTART;
+
+            sigemptyset(&signal_action.sa_mask);
+            if (-1 == sigaction(SIGINT, &signal_action, NULL))
+            {
+                fprintf(stderr, "Error setting up signal handler\n");
+                perror("sigaction");
+                return(-1);
+            }
+
+            // Create the sensor record file
+            snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+            if (-1 == snon_fd)
+            {
+                fprintf(stderr, "Error creating sensor record file\n");
+                perror("open");
+                return(-1);
+            }
+
+            senml_array = cJSON_CreateArray();
+
+            while (g_abort_collect == false)
+            {
+                iso8601_time(working_string, sizeof(working_string));
+
+                if (-1 == hxi_read_power(dev_fd, 0, &wattage))
+                {
+                    fprintf(stderr, "Error reading wattage value\n");
+                    cJSON_Delete(senml_array);
+                    close(snon_fd);
+                    return(-1);
+                }
+
+                entry = cJSON_CreateObject();
+
+                if (first_record)
+                {
+                    snprintf(working_string, sizeof(working_string), "urn:uuid:%s", uuid_value);
+                    cJSON_AddItemToObjectCS(entry, "bn", cJSON_CreateString(working_string));
+                    first_record = false;
+                }
+
+                cJSON_AddItemToObjectCS(entry, "v", cJSON_CreateNumber(wattage));
+                cJSON_AddItemToObjectCS(entry, "t", cJSON_CreateString(working_string));
+                cJSON_AddItemToArray(senml_array, entry);
+
+                usleep(100000);
+            }
+
+            // When abort signal received
+            snon_output = cJSON_PrintUnformatted(senml_array);
+
+            data_len = strlen(snon_output);
+            data_written_len = write(snon_fd, snon_output, data_len);
+            if ((size_t) data_written_len != data_len)
+            {
+                fprintf(stderr, "Error writing SNON value record\n");
+                perror("SNON write");
+                cJSON_free(snon_output);
+                cJSON_Delete(senml_array);
+                close(snon_fd);
+                return(-1);
+            }
+
+            cJSON_free(snon_output);
+            cJSON_Delete(senml_array);
+            close(snon_fd);
+        }
+
+        return(0);
+    }
+
+/*
+Select the active output rail on the HXi power supply
+------------------------------------------------------
+
+Sends a two-byte rail-selection command packet (command byte 0x02,
+payload byte rail) to the HXi device over the HID raw interface, then
+reads and validates the acknowledgement response. The device must reply
+with a two-byte response (length byte 0x02) and a status byte of 0x00
+indicating success.
+
+Interactions
+------------
+
+| Parameter    | Direction | Type    | Description                                                             |
+| ------------ | --------- | ------- | ----------------------------------------------------------------------- |
+| dev_fd       | in        | int     | Open file descriptor for the HID raw device                             |
+| rail         | in        | uint8_t | Rail index to select: 0 = 3.3 V, 1 = 5 V, 2 = 12 V                    |
+| return value | out       | int     | 0 on success; -1 if the write, read, or response validation fails       |
+
+Other changes to system state include:
+
+- Writes a 64-byte command packet to dev_fd.
+- Reads a 64-byte response packet from dev_fd.
+- Writes diagnostic messages to stderr on failure.
+
+*/
+
+    uint32_t hxi_select_rail(int dev_fd, uint8_t rail)
+    {
+        uint8_t     command[64];
+        uint8_t     response[64];
+
+        // Select the output rail to read
+        memset(&command, 0, sizeof(command));
+        memset(&response, 0, sizeof(response));
+        command[0] = 0x02;
+        command[1] = 0x00;  // Select Rail
+        command[2] = rail;  // Desired Rail
+
+        if(sizeof(command) != write(dev_fd, command, sizeof(command)))
+        {
+            fprintf(stderr,"Error writing command to device\n");
+            perror("Command Write");
+            return(-1);
+        }
+
+        if(sizeof(response) != read(dev_fd, response, sizeof(response)))
+        {
+            fprintf(stderr,"Error reading response from device\n");
+            perror("Command Read");
+            return(-1);
+        }
+
+        if(0x02 != response[0])
+        {
+            fprintf(stderr,"Unexpected response length %i (expected 2)\n", response[0]);
+            return(-1);
+        }
+
+         if(0x00 != response[1])
+        {
+            fprintf(stderr,"Unexpected response type '0x%02x' (expected 0x00)\n", response[1]);
+            return(-1);
+        }
+
+        return(0);
+    }
+
+/*
+Read the wattage from one output rail of the HXi power supply
+-------------------------------------------------------------
+
+Selects the specified rail by calling hxi_select_rail, sends a power-read
+command (0x03, 0x96) to the HXi device, reads the raw two-byte PMBus
+LINEAR11 register from bytes [2] and [3] of the response payload, and
+converts the result to a double-precision wattage value via reg_to_value.
+
+Interactions
+------------
+
+| Parameter    | Direction | Type    | Description                                                                |
+| ------------ | --------- | ------- | -------------------------------------------------------------------------- |
+| dev_fd       | in        | int     | Open file descriptor for the HID raw device                                |
+| rail         | in        | uint8_t | Rail index; passed through unchanged to hxi_select_rail                    |
+| wattage      | out       | double* | Receives the decoded power value in watts; not modified on failure         |
+| return value | out       | int     | 0 on success; -1 if rail selection, I/O, or response validation fails      |
+
+Other changes to system state include:
+
+- Calls hxi_select_rail, which issues its own write and read on dev_fd.
+- Writes a further 64-byte command packet to dev_fd.
+- Reads a further 64-byte response packet from dev_fd.
+- Writes diagnostic messages to stderr on failure.
+
+*/
+
+    uint32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage)
+    {
+        uint8_t     command[64];
+        uint8_t     response[64];
+        uint16_t    reg_contents = 0;
+
+        if(-1 == hxi_select_rail(dev_fd, rail))
+        {
+            fprintf(stderr,"Unable to select output rail\n");
+            return(-1);
+        }
+
+        memset(&command, 0, sizeof(command));
+        memset(&response, 0, sizeof(response));
+        command[0] = 0x03;
+        command[1] = 0x96;  // Read Power
+        if(sizeof(command) != write(dev_fd, command, sizeof(command)))
+        {
+            fprintf(stderr,"Error writing command to device\n");
+            perror("Command Write");
+            return(-1);
+        }
+
+        if(sizeof(response) != read(dev_fd, response, sizeof(response)))
+        {
+            fprintf(stderr,"Error reading response from device\n");
+            perror("Command Read");
+            return(-1);
+        }
+
+        if(0x03 != response[0])
+        {
+            fprintf(stderr,"Unexpected response length %i (expected 3)\n", response[0]);
+            return(-1);
+        }
+
+         if(0x96 != response[1])
+        {
+            fprintf(stderr,"Unexpected response type '0x%02x' (expected 0x96)\n", response[1]);
+            return(-1);
+        }
+
+        reg_contents = response[2] + (response[3] << 8);
+        *wattage = reg_to_value(reg_contents);
+
+        return(0);
+    }
+
+/*
+Decode a PMBus LINEAR11 register value to floating-point
+---------------------------------------------------------
+
+The PMBus LINEAR11 format encodes a value as a 16-bit word whose upper
+five bits [15:11] hold a signed 5-bit exponent $N$ and whose lower
+eleven bits [10:0] hold a signed 11-bit mantissa $Y$. The decoded
+real-world value is:
+
+$$value = Y \times 2^{N}$$
+
+Bit layout of the 16-bit register word:
+
+| Bits  | Field    | Width | Signed | Description               |
+| ----- | -------- | ----- | ------ | ------------------------- |
+| 15:11 | Exponent | 5     | Yes    | Power-of-two scale $N$    |
+| 10:0  | Mantissa | 11    | Yes    | Scaled integer value $Y$  |
+
+Interactions
+------------
+
+| Parameter    | Direction | Type     | Description                                      |
+| ------------ | --------- | -------- | ------------------------------------------------ |
+| reg          | in        | uint16_t | 16-bit PMBus LINEAR11 encoded register value     |
+| return value | out       | double   | Decoded floating-point value; no error condition |
+
+*/
+
+    double reg_to_value(uint16_t reg)
+    {
+        int16_t exponent;
+        int32_t mantissa;
+        double value;
+
+        exponent = (int16_t) reg >> 11;
+        mantissa = ((int16_t) ((reg & 0x7ff) << 5)) >> 5;
+
+        if(exponent >= 0)
+        {
+            value = (double) mantissa * (1L << exponent);
+        }
+        else
+        {
+            value = (double) mantissa / (1L << -exponent);
+        }
+
+        return(value);
+    }
+
+/*
+Validate a UUID string against the RFC 4122 canonical format
+------------------------------------------------------------
+
+Checks that the input string is exactly 36 bytes in length and conforms
+to the canonical UUID pattern `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`,
+where `x` is a hexadecimal digit (upper or lower case) and `-` appears
+at byte offsets 8, 13, 18, and 23.
+
+Because valid UUIDs consist entirely of ASCII characters, using strlen
+to obtain the byte count is correct and does not conflict with the
+UTF-8 string handling requirement of Rule 1.2.
+
+Interactions
+------------
+
+| Parameter    | Direction | Type  | Description                                                        |
+| ------------ | --------- | ----- | ------------------------------------------------------------------ |
+| uuid_value   | in        | char* | Null-terminated string to validate                                 |
+| return value | out       | bool  | true if the string is a well-formed RFC 4122 UUID; false otherwise |
+
+*/
+
+    bool is_valid_uuid(char* uuid_value)
+    {
+        uint32_t i = 0;
+
+        if(36 != strlen(uuid_value))
+        {
+            return(false);
+        }
+
+        while(i < 36)
+        {
+            if(8 == i || 13 == i || 18 == i || 23 == i)
+            {
+                if('-' != uuid_value[i])
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                if(0 == isxdigit((unsigned char) uuid_value[i]))
+                {
+                    return false;
+                }
+            }
+
+            i = i + 1;
+        }
+
+        return(true);
+    }
+
+/*
+Generate a random RFC 4122 version 4 UUID string
+-------------------------------------------------
+
+Reads 16 bytes of cryptographically random data from /dev/urandom,
+applies the version (4) and variant (1) bit fields required by RFC 4122
+section 4.4, and formats the result as a 36-character null-terminated
+UUID string of the form `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+
+The caller must supply a buffer of at least 37 bytes.
+
+Interactions
+------------
+
+| Parameter    | Direction | Type  | Description                                                                |
+| ------------ | --------- | ----- | -------------------------------------------------------------------------- |
+| uuid_value   | out       | char* | Caller-allocated buffer of at least 37 bytes; receives the UUID string     |
+| return value | out       | int   | 0 on success; -1 if /dev/urandom cannot be opened or read                  |
+
+Other changes to system state include:
+
+- Opens and closes a file descriptor for /dev/urandom.
+- Reads 16 bytes from /dev/urandom.
+- Writes diagnostic messages to stderr on failure.
+
+*/
+
+    uint32_t generate_random_uuid(char* uuid_value)
+    {
+        uint8_t     uuid_bytes[16];
+        int         urandom_fd = -1;
+
+        urandom_fd = open("/dev/urandom", O_RDONLY);
+
+        if(-1 == urandom_fd)
+        {
+            fprintf(stderr,"Unable to open /dev/urandom for UUID generation\n");
+            perror("/dev/urandom");
+            return(-1);
+        }
+
+        if((ssize_t)sizeof(uuid_bytes) != read(urandom_fd, uuid_bytes, sizeof(uuid_bytes)))
+        {
+            fprintf(stderr,"Unable to read from /dev/urandom for UUID generation\n");
+            perror("/dev/urandom");
+            close(urandom_fd);
+            return(-1);
+        }
+
+        close(urandom_fd);
+
+        uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x40;  // Version 4
+        uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80;  // Variant 1
+
+        snprintf(uuid_value, 37,
+            "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+            uuid_bytes[0],  uuid_bytes[1],  uuid_bytes[2],  uuid_bytes[3],
+            uuid_bytes[4],  uuid_bytes[5],
+            uuid_bytes[6],  uuid_bytes[7],
+            uuid_bytes[8],  uuid_bytes[9],
+            uuid_bytes[10], uuid_bytes[11], uuid_bytes[12],
+            uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]);
+
+        return(0);
+    }
+
+/*
+Format the current UTC time as an ISO 8601 microsecond-precision string
+------------------------------------------------------------------------
+
+Reads the current real-time clock via clock_gettime(CLOCK_REALTIME),
+converts the result to broken-down UTC time using gmtime_r, and writes a
+null-terminated timestamp string in the format `YYYY-MM-DDTHH:MM:SS.ffffffZ`
+into the caller-supplied buffer.
+
+The buffer must be at least `c_iso8601_len` (28) bytes. The trailing `Z`
+denotes UTC. The sub-second field `ffffff` is derived from the timespec
+nanosecond component: $\lfloor tv\_nsec \div 1000 \rfloor$.
+
+Interactions
+------------
+
+| Parameter    | Direction | Type   | Description                                                                     |
+| ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
+| buf          | out       | char*  | Caller-allocated buffer that receives the null-terminated timestamp string      |
+| len          | in        | size_t | Byte length of buf; must be >= c_iso8601_len (28)                               |
+| return value | out       | char*  | Pointer to buf on success; NULL if buf is NULL, len is too small, or either     |
+|              |           |        | clock_gettime or gmtime_r fails                                                 |
+
+Other changes to system state include:
+
+- Calls clock_gettime(CLOCK_REALTIME), which reads the kernel real-time clock.
+- Calls gmtime_r to convert the time_t seconds field to a broken-down UTC struct tm.
+
+*/
+
+    char* iso8601_time(char* buf, size_t len)
+    {
+        struct timespec     ts;
+        struct tm           t;
+
+        if(buf == NULL || len < ISO8601_LEN)
+        {
+            return(NULL);
+        }
+
+        if(0 != clock_gettime(CLOCK_REALTIME, &ts))
+        {
+            return(NULL);
+        }
+
+        if(NULL == gmtime_r(&ts.tv_sec, &t))
+        {
+            return(NULL);
+        }
+
+        snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02d.%06ldZ",
+            t.tm_year + 1900,
+            t.tm_mon  + 1,
+            t.tm_mday,
+            t.tm_hour,
+            t.tm_min,
+            t.tm_sec,
+            (long)(ts.tv_nsec / 1000L));
+
+        return(buf);
+    }
+
+/*
+Handle SIGINT and pass through all other signals
+-------------------------------------------------
+
+Installed as the SIGINT action by hxi_collect_values. On receipt of
+SIGINT, sets the global g_abort_collect flag to true, which causes the
+collection loop to exit cleanly after its current polling iteration
+completes.
+
+For any other signal, the handler restores the default system disposition
+via sigaction and immediately re-raises the signal, allowing the process
+to behave as if the custom handler had never been installed.
+
+Interactions
+------------
+
+| Parameter       | Direction | Type         | Description                                                                             |
+| --------------- | --------- | ------------ | --------------------------------------------------------------------------------------- |
+| signum          | in        | int          | Signal number delivered by the kernel                                                   |
+| g_abort_collect | shared    | sig_atomic_t | Global flag; written to true when signum is SIGINT; declared volatile so the write      |
+|                 |           |              | is visible to the main thread without the compiler eliding it                           |
+
+Other changes to system state include:
+
+- For signals other than SIGINT: calls sigaction(signum, SIG_DFL) to restore the
+  default handler, then raise(signum) to re-deliver the signal, which may terminate
+  the process or produce a core dump depending on the signal.
+
+*/
+
+    static void signal_handler(int signum)
+    {
+        struct sigaction    signal_action = {0};
+
+        if(SIGINT == signum)
+        {
+            // Set an abort flag for sigint
+            g_abort_collect = true;
+        }
+        else
+        {
+            // Pass through other signals
+            signal_action.sa_handler = SIG_DFL;
+            sigemptyset(&signal_action.sa_mask);
+            signal_action.sa_flags = 0;
+            sigaction(signum, &signal_action, NULL);
+            raise(signum);
+        }
+    }
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>

@@ -9,6 +9,9 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
+%.o: %.html
+	$(CC) $(CFLAGS) -x c -c $< -o $@
+
 clean:
 	$(RM) $(TARGET) $(OBJS)
 
