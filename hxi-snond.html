@@ -1,6 +1,22 @@
 //#<!DOCTYPE html><html><title>HXi Power Supply Sensor Daemon</title><xmp theme="united" style="display:none;">
+/*
+Overview
+--------------------------
+
+Polls and writes sensor data from Corsair HXi series power supplies.
+Sensor data is written in SNON 4 SenML format. The daemon opens the
+specified HID raw device, creates initial SNON device and sensor records
+on first run, then enters a continuous polling loop until SIGINT.
+
+Known issues:
+
+- On subsequent runs, the daemon does not reload the sensor UUID from the existing SNON device record.
+- Loading which sensors to read from the config JSON file is not yet implemented.
+
+*/
+
     // ---------------------------------------------------------------------------------
-    // HXi Power Supply Sensor Daemon
+    // HX1000i Power Supply Sensor Daemon - Main routines
     // ---------------------------------------------------------------------------------
     // Polls and writes out sensor data from HXi power supplies.
     // Sensor data is written in SNON 4 format.
@@ -9,40 +25,101 @@
     // SPDX-FileAttributionText: https://github.com/dslik/hxi-snond/
     // SPDX-License-Identifier: BSD-3-Clause
     // ---------------------------------------------------------------------------------
-    #include <stdio.h>
-    #include <stdlib.h>
-    #include <stdint.h>
-    #include <stdbool.h>
-    #include <ctype.h>
-    #include <limits.h>
-    #include <string.h>
-    #include <unistd.h>
-    #include <time.h>
-    #include <getopt.h>
-    #include <fcntl.h>
-    #include <signal.h>
-    #include <unistd.h>
-    #include <sys/ioctl.h>
-    #include <sys/stat.h>
+
+    #include <stdio.h>          // fprintf, snprintf, perror, vfprintf, stdout, stderr
+    #include <stdlib.h>         // malloc, free, abort, EXIT_SUCCESS, EXIT_FAILURE
+    #include <stdarg.h>         // va_list, va_start, va_end
+    #include <stdint.h>         // uint8_t, uint16_t, uint32_t, int8_t, int16_t, int32_t
+    #include <stdbool.h>        // bool, true, false
+    #include <ctype.h>          // isxdigit
+    #include <limits.h>         // PATH_MAX
+    #include <string.h>         // memset, memcpy, strlen
+    #include <unistd.h>         // access, read, write, close, R_OK, W_OK
+    #include <time.h>           // clock_gettime, gmtime_r, nanosleep, struct timespec, struct tm
+    #include <getopt.h>         // getopt, optarg
+    #include <fcntl.h>          // open, O_RDONLY, O_RDWR, O_CREAT, O_TRUNC
+    #include <signal.h>         // sigaction, sigemptyset, raise, SIGINT, SA_RESTART, struct sigaction
+    #include <sys/ioctl.h>      // ioctl
+    #include <sys/stat.h>       // fstat, mkdir, struct stat, S_IRUSR, S_IWUSR, S_IRWXU
 
     // Linux includes
-    #include <linux/hidraw.h>
+    #include <linux/hidraw.h>   // HIDIOCGRAWINFO, struct hidraw_devinfo
 
     // Local includes
-    #include "cJSON.h"
+    #include "dbc.h"            // Design-by-contract library
+    #include "cJSON.h"          // cJSON library
 
-    // Defines
-    #define ISO8601_LEN     28
+/*
+Project constants
+-----------------
 
-    // Prototypes
-    cJSON* json_read_file(char* json_file_path);
-    void snon_addname(cJSON* snon_object, char* field, char* lang, char* name);
-    uint32_t hxi_collect_values(char* snon_path, int dev_fd, char* uuid_value);
-    uint32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage);
-    uint32_t hxi_select_rail(int dev_fd, uint8_t rail);
+HXi hardware identifiers are drawn from the USB vendor/product database.
+HXi protocol constants reflect the Corsair HID command set documented in
+community forum postings.
+
+PMBus LINEAR11 field constants are derived from the PMBus 1.3 specification,
+section 7.4.3.
+*/
+
+    // General
+    #define C_SUCCESS           0           // Function return indicating success
+    #define C_FAILURE           (-1)        // Function return indicating failure
+
+    // ISO 8601 timestamp
+    #define C_ISO8601_LEN       28U         // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
+
+    // RFC 4122 UUID
+    #define C_UUID_STRLEN       36U         // Character count of a UUID string (no null)
+    #define C_UUID_LEN          37U         // Buffer size including null terminator
+    #define C_UUID_HYPHEN_1     8U          // Byte offset of first  hyphen in a UUID string
+    #define C_UUID_HYPHEN_2     13U         // Byte offset of second hyphen
+    #define C_UUID_HYPHEN_3     18U         // Byte offset of third  hyphen
+    #define C_UUID_HYPHEN_4     23U         // Byte offset of fourth hyphen
+
+    // HXi HID device identifiers
+    #define C_HXI_VENDOR_ID     0x1b1c      // Corsair USB vendor identifier
+    #define C_HXI_PRODUCT_ID    0x1c1e      // HX1000i USB product identifier
+
+    // HXi HID packet layout
+    #define C_HXI_PACKET_LEN    64U         // All HID packets are 64 bytes
+    #define C_HXI_RAIL_CMD_LEN  0x02U       // Length byte in a rail-select packet
+    #define C_HXI_RAIL_SEL_CMD  0x00U       // Command byte: select output rail
+    #define C_HXI_RAIL_OK       0x00U       // Response status byte: success
+    #define C_HXI_PWR_CMD_LEN   0x03U       // Length byte in a power-read packet
+    #define C_HXI_PWR_READ_CMD  0x96U       // Command byte: read wattage
+
+    // HXi output rail indices
+    #define C_HXI_RAIL_3V3      0U          // 3.3 V output rail index
+    #define C_HXI_RAIL_5V       1U          // 5 V output rail index
+    #define C_HXI_RAIL_12V      2U          // 12 V output rail index
+
+    // PMBus LINEAR11 register field constants
+    #define C_L11_EXP_SHIFT     11U         // Bit position of the 5-bit exponent field
+    #define C_L11_MANT_MASK     0x07FFU     // Mask for the 11-bit mantissa field [10:0]
+    #define C_L11_EXP_SIGN_BIT  0x10U       // Sign bit within the 5-bit exponent (bit 4)
+    #define C_L11_EXP_SEXT_MASK 0xFFE0U     // Sign-extension mask for a 5-bit exponent
+    #define C_L11_MANT_SIGN_BIT 0x0400U     // Sign bit within the 11-bit mantissa (bit 10)
+    #define C_L11_MANT_SEXT_MSK 0xFFFFF800U // Sign-extension mask for 11-bit mantissa
+
+    // Polling interval for hxi_collect_values
+    #define C_POLL_INTERVAL_NS  100000000   // 100 ms in nanoseconds (type int, assigned to long tv_nsec)
+
+/*
+Project prototypes
+------------------
+
+Local functions
+*/
+
+    int main(int argc, char* argv[]);
+    void snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name);
+    cJSON* json_load_file(const char* json_file_path);
+    int32_t hxi_collect_values(char* snon_path, int dev_fd, char* uuid_value);
+    int32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage);
+    int32_t hxi_select_rail(int dev_fd, uint8_t rail);
     double reg_to_value(uint16_t reg);
     bool is_valid_uuid(char* uuid_value);
-    uint32_t generate_random_uuid(char* uuid_value);
+    int32_t generate_random_uuid(char* uuid_value);
     char* iso8601_time(char* buf, size_t len);
     static void signal_handler(int signum);
 
@@ -58,6 +135,7 @@
                           "  -h          Show this help message\n";
 
     static volatile sig_atomic_t g_abort_collect = false;
+
 
 /*
 HXi sensor daemon entry point
@@ -93,69 +171,92 @@ Other changes to system state include:
 
     int main(int argc, char* argv[])
     {
-        int                     opt = 0;
+        int32_t                 opt = 0;
         const char*             device_name = "/dev/hidraw0";
         const char*             output_path = "./";
         const char*             config_path = "./sensors.json";
         const char*             uuid_arg = NULL;
-        char                    device_uuid[37];
-        char                    sensor_uuid[37];
-        int                     dev_fd = 0;
-        char                    snon_path[PATH_MAX];
-        int                     snon_fd = 0;
-        struct hidraw_devinfo   hid_info;
+        char                    device_uuid[C_UUID_LEN] = {0};
+        char                    sensor_uuid[C_UUID_LEN] = {0};
+        int32_t                 dev_fd = 0;
+        char                    snon_path[PATH_MAX] = {0};
+        int32_t                 snon_fd = 0;
+        struct hidraw_devinfo   hid_info = {0};
         cJSON*                  config_json = NULL;
         cJSON*                  snon_root = NULL;
         cJSON*                  relation_object = NULL;
         cJSON*                  relation_array = NULL;
         char*                   snon_output = NULL;
-        char                    working_string[1024];
+        char                    working_string[1024] = {0};
+        size_t                  output_len = 0U;
+        ssize_t                 bytes_written = 0;
 
         // Obtain command line arguments
-        while(-1 != opt)
+        while(C_FAILURE != opt)
         {
             opt = getopt(argc, argv, "d:o:c:u:h");
 
             switch(opt)
             {
                 case 'd':
+                {
                     device_name = optarg;
                     break;
+                }
                 case 'o':
+                {
                     output_path = optarg;
                     break;
+                }
                 case 'c':
+                {
                     config_path = optarg;
                     break;
+                }
                 case 'u':
+                {
                     uuid_arg = optarg;
                     break;
+                }
                 case 'h':
+                {
                     fprintf(stdout, "%s", g_usage);
-                    return EXIT_SUCCESS;
+                    return(EXIT_SUCCESS);
+                }
                 case '?':
+                {
                     fprintf(stderr, "%s", g_usage);
-                    return EXIT_FAILURE;
+                    return(EXIT_FAILURE);
+                }
+                case C_FAILURE:
+                {
+                    // getopt has finished; the while condition will exit the loop.
+                    break;
+                }
+                default:
+                {
+                    break;
+                }
             }
         }
 
         // ===========================================================
         // Validate Inputs
-        if(0 != access(device_name, R_OK | W_OK))
+        if(C_FAILURE == access(device_name, R_OK | W_OK))
         {
             fprintf(stderr,"Error accessing specified hid device: %s\n", device_name);
             perror(device_name);
             return(EXIT_FAILURE);
         }
 
-        if(0 != access(output_path, R_OK | W_OK))
+        if(C_FAILURE == access(output_path, R_OK | W_OK))
         {
             fprintf(stderr,"Error accessing specified output directory: %s\n", output_path);
             perror(output_path);
             return(EXIT_FAILURE);
         }
 
-        if(0 != access(config_path, R_OK))
+        if(C_FAILURE == access(config_path, R_OK))
         {
             fprintf(stderr,"Error accessing specified config file: %s\n", config_path);
             perror(config_path);
@@ -182,7 +283,7 @@ Other changes to system state include:
         }
         else
         {
-            if(-1 == generate_random_uuid(device_uuid))
+            if(C_FAILURE == generate_random_uuid(device_uuid))
             {
                 fprintf(stderr,"Error generating random UUID\n");
                 return(EXIT_FAILURE);
@@ -194,54 +295,77 @@ Other changes to system state include:
         dev_fd = open(device_name, O_RDWR);
 
         memset(&hid_info, 0, sizeof(hid_info));
-        if(0 != ioctl(dev_fd, HIDIOCGRAWINFO, &hid_info))
+        if(C_FAILURE == ioctl(dev_fd, HIDIOCGRAWINFO, &hid_info))
         {
             fprintf(stderr,"Specified path '%s' is not a HID device.\n", device_name);
             perror(device_name);
+            close(dev_fd);
             return(EXIT_FAILURE);
         }
           
-        if(0x1b1c != hid_info.vendor)
+        if(C_HXI_VENDOR_ID != hid_info.vendor)
         {
-            fprintf(stderr,"Unexpected HID vendor '0x%04x' (expected 0x1b1c)\n", hid_info.vendor);
+            fprintf(stderr, "Unexpected HID vendor '0x%04x' (expected 0x%04x)\n", hid_info.vendor, C_HXI_VENDOR_ID);
+            close(dev_fd);
             return(EXIT_FAILURE);
         }
 
-        if(0x1c1e != hid_info.product)
+        if(C_HXI_PRODUCT_ID != hid_info.product)
         {
-            fprintf(stderr,"Unexpected HID product '0x%04x' (expected 0x1c1e)\n", hid_info.product);
+            fprintf(stderr, "Unexpected HID product '0x%04x' (expected 0x%04x)\n", hid_info.product, C_HXI_PRODUCT_ID);
+            close(dev_fd);
             return(EXIT_FAILURE);
         }
 
         // ===========================================================
         // Read a configuration JSON file that specifies which sensors
         // should be collected
-        config_json = json_read_file((char*) config_path);
+        config_json = json_load_file((char*) config_path);
+        snon_output = cJSON_PrintUnformatted(config_json);
 
-      
+        
 
 
         // ===========================================================
         // Create SNON device and sensor records if they do not exist
         snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, device_uuid);
 
-        if(0 != access(snon_path, R_OK | W_OK))
+        if(C_FAILURE == access(snon_path, R_OK | W_OK))
         {
             // Create a new SNON device object
             snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
 
+            if(C_FAILURE == snon_fd)
+            {
+                fprintf(stderr, "Error creating SNON device record file: %s\n", snon_path);
+                perror("open");
+                close(dev_fd);
+                return(EXIT_FAILURE);
+            }
+
             // Create a new device record
             snon_root = cJSON_CreateObject();
+            ASSERT(NULL != snon_root, "cJSON_CreateObject() returned NULL; memory exhausted");
+
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
             cJSON_AddItemToObjectCS(snon_root, "eID", cJSON_CreateString(working_string));
             cJSON_AddItemToObjectCS(snon_root, "eC", cJSON_CreateString("device"));
             snon_addname(snon_root, "eN", "*", "HX1000i Power Supply");
             snon_output = cJSON_PrintUnformatted(snon_root);
 
-            if(strlen(snon_output) != write(snon_fd, snon_output, strlen(snon_output)))
+            output_len = strlen(snon_output);
+            bytes_written = write(snon_fd, snon_output, output_len);
+
+            // ASGFC-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with
+            // output_len (size_t); safe because bytes_written is checked for < 0 first.
+            if((bytes_written < 0) || ((size_t) bytes_written != output_len))
             {
-                fprintf(stderr,"Error writing SNON device record\n");
+                fprintf(stderr, "Error writing SNON device record\n");
                 perror("write");
+                cJSON_free(snon_output);
+                cJSON_Delete(snon_root);
+                close(snon_fd);
+                close(dev_fd);
                 return(EXIT_FAILURE);
             }
 
@@ -275,10 +399,19 @@ Other changes to system state include:
             cJSON_AddItemToObjectCS(snon_root, "eR", relation_object);
             snon_output = cJSON_PrintUnformatted(snon_root);
 
-            if(strlen(snon_output) != write(snon_fd, snon_output, strlen(snon_output)))
+            output_len = strlen(snon_output);
+            bytes_written = write(snon_fd, snon_output, output_len);
+
+            // ASGFC-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with
+            // output_len (size_t); safe because bytes_written is checked for < 0 first.
+            if((bytes_written < 0) || ((size_t) bytes_written != output_len))
             {
-                fprintf(stderr,"Error writing SNON sensor record\n");
+                fprintf(stderr, "Error writing SNON device record\n");
                 perror("write");
+                cJSON_free(snon_output);
+                cJSON_Delete(snon_root);
+                close(snon_fd);
+                close(dev_fd);
                 return(EXIT_FAILURE);
             }
 
@@ -339,11 +472,18 @@ Other changes to system state include:
 
 */
 
-    void snon_addname(cJSON* snon_object, char* field, char* lang, char* name)
+    void snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name)
     {
         cJSON*  name_object = NULL;
 
+        REQUIRES(NULL != snon_object, "NULL pointer passed for snon_object");
+        REQUIRES(NULL != field, "NULL pointer passed for field");
+        REQUIRES(NULL != lang, "NULL pointer passed for lang");
+        REQUIRES(NULL != name, "NULL pointer passed for name");
+
         name_object = cJSON_CreateObject();
+        ASSERT(NULL != name_object, "cJSON_CreateObject() returned NULL; memory exhausted");
+
         cJSON_AddItemToObjectCS(name_object, lang, cJSON_CreateString(name));
         cJSON_AddItemToObjectCS(snon_object, field, name_object);
     }
@@ -377,54 +517,59 @@ Other changes to system state include:
 
 */
 
-    cJSON* json_read_file(char* json_file_path)
+    cJSON* json_load_file(const char* json_file_path)
     {
-        int             json_file = -1;
-        struct stat     st;
-        off_t           length = 0;
+        int32_t         json_fd = C_FAILURE;
+        struct stat     file_stat = {0};
+        off_t           file_length = 0;
         char*           read_buffer = NULL;
         ssize_t         bytes_read = 0;
         cJSON*          json_contents = NULL;
         const char*     error_ptr = NULL;
 
-        json_file = open(json_file_path, O_RDONLY);
-        if(json_file == -1)
+        REQUIRES(NULL != json_file_path, "NULL pointer passed for json_file_path");
+
+        json_fd = open(json_file_path, O_RDONLY);
+
+        if(C_FAILURE == json_fd)
         {
             fprintf(stderr,"Unable to open JSON file '%s'.\n", json_file_path);
             return(NULL);
         }
 
         // Get file size
-        if(-1 == fstat(json_file, &st))
+        if(C_FAILURE == fstat(json_fd, &file_stat))
         {
             fprintf(stderr,"Unable to get size of JSON file '%s'.\n", json_file_path);
-            close(json_file);
+            close(json_fd);
             return(NULL);
         }
         
-        length = st.st_size;
+        file_length = file_stat.st_size;
 
-        // Allocate memory to read file
-        read_buffer = (char*) malloc(length + 1);
+        // ASGFC-C 2026 5.25: VIOLATION: cast from off_t to size_t to pass to
+        // malloc and read; safe because file_length is non-negative (fstat succeeds).
+        read_buffer = malloc((size_t) (file_length + 1));
+
         if(NULL == read_buffer)
         {
-            fprintf(stderr,"Unable to allocate %ld bytes of memory to read JSON file.\n", length);
-            close(json_file);
+            fprintf(stderr,"Unable to allocate %ld bytes of memory to read JSON file.\n", file_length);
+            close(json_fd);
             return(NULL);
         }
 
         // Read the file's contents
-        bytes_read = read(json_file, read_buffer, length);
-        close(json_file);
+        bytes_read = read(json_fd, read_buffer, (size_t) file_length);
+        close(json_fd);
 
-        if(bytes_read != length)
+        if(bytes_read != file_length)
         {
-            fprintf(stderr,"Unable to read file, expected %ld bytes, got %ld bytes.\n", length, bytes_read);
+            fprintf(stderr,"Unable to read file, expected %ld bytes, got %ld bytes.\n", file_length, bytes_read);
             free(read_buffer);
             return(NULL);
         }
 
-        read_buffer[length] = '\0';
+        read_buffer[file_length] = '\0';
 
         // Parse the contents of the file
         json_contents = cJSON_Parse(read_buffer);
@@ -433,7 +578,7 @@ Other changes to system state include:
         if(NULL == json_contents)
         {
             error_ptr = cJSON_GetErrorPtr();
-            fprintf(stderr, "Error parsing JSON at: %s\n", error_ptr);
+            fprintf(stderr, "Error parsing JSON file '%s' near: %s\n", json_file_path, error_ptr);
             return(NULL);
         }
 
@@ -473,7 +618,7 @@ Other changes to system state include:
 
 */
 
-    uint32_t hxi_collect_values(char* snon_path, int dev_fd, char* uuid_value)
+    int32_t hxi_collect_values(char* snon_path, int dev_fd, char* uuid_value)
     {
         double              wattage = 0.0;
         int                 snon_fd = -1;
@@ -589,7 +734,7 @@ Other changes to system state include:
 
 */
 
-    uint32_t hxi_select_rail(int dev_fd, uint8_t rail)
+    int32_t hxi_select_rail(int dev_fd, uint8_t rail)
     {
         uint8_t     command[64];
         uint8_t     response[64];
@@ -658,7 +803,7 @@ Other changes to system state include:
 
 */
 
-    uint32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage)
+    int32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage)
     {
         uint8_t     command[64];
         uint8_t     response[64];
@@ -837,7 +982,7 @@ Other changes to system state include:
 
 */
 
-    uint32_t generate_random_uuid(char* uuid_value)
+    int32_t generate_random_uuid(char* uuid_value)
     {
         uint8_t     uuid_bytes[16];
         int         urandom_fd = -1;
@@ -885,7 +1030,7 @@ converts the result to broken-down UTC time using gmtime_r, and writes a
 null-terminated timestamp string in the format `YYYY-MM-DDTHH:MM:SS.ffffffZ`
 into the caller-supplied buffer.
 
-The buffer must be at least `c_iso8601_len` (28) bytes. The trailing `Z`
+The buffer must be at least `C_ISO8601_LEN` (28) bytes. The trailing `Z`
 denotes UTC. The sub-second field `ffffff` is derived from the timespec
 nanosecond component: $\lfloor tv\_nsec \div 1000 \rfloor$.
 
@@ -895,7 +1040,7 @@ Interactions
 | Parameter    | Direction | Type   | Description                                                                     |
 | ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
 | buf          | out       | char*  | Caller-allocated buffer that receives the null-terminated timestamp string      |
-| len          | in        | size_t | Byte length of buf; must be >= c_iso8601_len (28)                               |
+| len          | in        | size_t | Byte length of buf; must be >= C_ISO8601_LEN (28)                               |
 | return value | out       | char*  | Pointer to buf on success; NULL if buf is NULL, len is too small, or either     |
 |              |           |        | clock_gettime or gmtime_r fails                                                 |
 
@@ -911,7 +1056,7 @@ Other changes to system state include:
         struct timespec     ts;
         struct tm           t;
 
-        if(buf == NULL || len < ISO8601_LEN)
+        if(buf == NULL || len < C_ISO8601_LEN)
         {
             return(NULL);
         }

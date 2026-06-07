@@ -1,8 +1,9 @@
-CFLAGS += -Wall -ggdb
-LDLIBS += -lm
+CFLAGS  += -Wall -Wextra -Werror -pedantic -ggdb -fno-omit-frame-pointer
+LDFLAGS += -rdynamic
+LDLIBS  += -lm
 
 TARGET = hxi-snond
-OBJS   = hxi-snond.o cJSON.o
+OBJS   = hxi-snond.o cJSON.o dbc.o
 
 all: $(TARGET)
 

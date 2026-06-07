@@ -1,0 +1,111 @@
+//#<!DOCTYPE html><html><title>Design-by-Contract Utility Library</title><xmp theme="united" style="display:none;">
+/*
+Overview
+--------------------------
+
+Provides an Eiffel-style design-by-contract macros and utility functions for REQUIRES, ENSURES and ASSERT.
+
+Known issues:
+- None
+
+*/
+
+    // ---------------------------------------------------------------------------------
+    // Linux Application Utilities - Design-by-Contract Utilities
+    // ---------------------------------------------------------------------------------
+    // Provides an Eiffel-style design-by-contract macros and utility functions for
+    // REQUIRES, ENSURES and ASSERT.
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/hxi-snond/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+
+    #include <stdio.h>          // fprintf, vfprintf, stderr
+    #include <stdlib.h>         // abort, free
+    #include <stdarg.h>         // va_list, va_start, va_end
+    #include <stdint.h>         // uint32_t, int32_t
+    #include <inttypes.h>       // PRIu32
+    #include <execinfo.h>       // backtrace, backtrace_symbols
+
+    // Local includes
+    #include "dbc.h"            // Design-by-contract Prototypes
+
+
+/*
+Safety abort helper function
+----------------------------
+
+Prints a structured failure message to `stderr`, dumps the current call
+stack using `backtrace` and `backtrace_symbols`, then calls `abort()`.
+This function is called exclusively from the REQUIRES, ENSURES, and ASSERT
+macros and must never be invoked directly.
+
+The `check_type` argument distinguishes REQUIRES, ENSURES, and ASSERT in
+the output. The `func_name` and `line_num` arguments are supplied by the
+`__func__` and `__LINE__` predefined identifiers inside each macro.
+The `cond_str` argument is the stringified form of the failed condition,
+produced by the `#cond` preprocessor operator inside each macro.
+
+Interactions
+------------
+
+| Parameter  | Direction | Type          | Description                                           |
+| ---------- | --------- | ------------- | ----------------------------------------------------- |
+| check_type | in        | const char*   | One of "REQUIRES", "ENSURES", "ASSERT"                |
+| func_name  | in        | const char*   | Name of the function in which the check failed        |
+| line_num   | in        | uint32_t      | Source line number of the failed check                |
+| cond_str   | in        | const char*   | Stringified source text of the failed condition       |
+| format     | in        | const char*   | printf-style format string for the failure message    |
+| ...        | in        | variadic      | Arguments referenced by format                        |
+
+Other changes to system state include:
+
+- Prints to stderr.
+- Calls backtrace() and backtrace_symbols() to capture the call stack.
+- Calls abort(), which raises SIGABRT and terminates the process.
+
+*/
+
+    // MISRA-C 2023 17.1: VIOLATION: variadic function features required for printf-style failure messages
+    void safety_abort(const char* check_type,
+                      const char* func_name,
+                      uint32_t    line_num,
+                      const char* cond_str,
+                      const char* format, ...)
+    {
+        va_list     args;                               // initialized via va_start below
+        void*       stack_frames[C_STACK_DEPTH] = {0};
+        uint32_t    frame_count = 0;
+        char**      stack_symbols = NULL;
+        uint32_t    frame_index = 0;
+
+        // MISRA-C 2023 21.6: VIOLATION: fprintf to stderr required for structured failure output; applies to all fprintf and vfprintf calls in this function
+        fprintf(stderr, "\n%s failure (%s:%" PRIu32 "):\n  Condition: '%s' evaluates to false\n  Message: ", check_type, func_name, line_num, cond_str);
+
+        va_start(args, format);
+        vfprintf(stderr, format, args);
+        va_end(args);
+
+        fprintf(stderr, "\n  Stack trace:\n");
+
+        // ASGFC-C 2026 5.25: VIOLATION: Explicit casts required to convert to/from POSIX types
+        frame_count = (uint32_t) backtrace(stack_frames, (int) C_STACK_DEPTH);
+        stack_symbols = backtrace_symbols(stack_frames, (int) frame_count);
+
+        if(NULL != stack_symbols)
+        {
+            while(frame_index < frame_count)
+            {
+                fprintf(stderr, "  [%" PRIu32 "] %s\n", frame_index, stack_symbols[frame_index]);
+                frame_index = frame_index + 1;
+            }
+
+            // MISRA-C 2023 21.3: VIOLATION: free() required to release memory allocated by backtrace_symbols()
+            free(stack_symbols);
+        }
+
+        abort();
+    }
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>
