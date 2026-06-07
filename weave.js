@@ -311,6 +311,188 @@ if(k<elements.length){setTimeout(doWork,250);}else if(opt_whenDone){opt_whenDone
 doWork();}
 var PR=win['PR']={'createSimpleLexer':createSimpleLexer,'registerLangHandler':registerLangHandler,'sourceDecorator':sourceDecorator,'PR_ATTRIB_NAME':PR_ATTRIB_NAME,'PR_ATTRIB_VALUE':PR_ATTRIB_VALUE,'PR_COMMENT':PR_COMMENT,'PR_DECLARATION':PR_DECLARATION,'PR_KEYWORD':PR_KEYWORD,'PR_LITERAL':PR_LITERAL,'PR_NOCODE':PR_NOCODE,'PR_PLAIN':PR_PLAIN,'PR_PUNCTUATION':PR_PUNCTUATION,'PR_SOURCE':PR_SOURCE,'PR_STRING':PR_STRING,'PR_TAG':PR_TAG,'PR_TYPE':PR_TYPE,'prettyPrintOne':win['prettyPrintOne']=prettyPrintOne,'prettyPrint':win['prettyPrint']=prettyPrint};if(typeof define==="function"&&define['amd']){define("google-code-prettify",[],function(){return PR;});}})();
 
+// ──────────────────────────────────────────────────────────────────────────────────
+// Public Domain (AI-Generated)
+
+/**
+ * addFunctionLinks()
+ *
+ * Processes Google Code Prettify-formatted HTML that contains C source code.
+ *
+ *  Pass 1 – Scan every <code class="prettyprinted"> block for function definitions.
+ *            A definition is recognised as the pattern at brace-depth 0 (file scope):
+ *
+ *              <pln: identifier>  <pun: starts with '('>  …params…
+ *              <pun: ends with ')'>  <pun: starts with '{'>
+ *
+ *  Pass 2 – Insert <a id="def_<name>" name="def_<name>"> immediately before the
+ *            name span of every definition, creating a scroll/fragment target.
+ *
+ *  Pass 3 – For every call site — a pln identifier followed by a '(' pun span —
+ *            where that function IS defined in the document, wrap the identifier
+ *            text in <a href="#def_<name>">.  Functions not defined in the
+ *            document are left untouched.
+ */
+function addFunctionLinks() {
+
+    // ── Gather spans from all prettified code blocks ──────────────────────────
+    const codeBlocks = document.querySelectorAll('code.prettyprinted');
+    if (!codeBlocks.length) return;
+
+    /** @type {HTMLSpanElement[]} */
+    const spans = [];
+    codeBlocks.forEach(block =>
+        block.querySelectorAll('span').forEach(s => spans.push(s))
+    );
+    const n = spans.length;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * Return the first CSS class on a span element.
+     * Google Prettify uses single-class spans: kwd | pln | pun | com | str | lit | typ
+     */
+    const cls = el => el.className.trim().split(/\s+/)[0];
+
+    /** True when a span contains only whitespace (newlines, spaces, tabs). */
+    const isWS = el => !el.textContent.trim();
+
+    /**
+     * Index of the next non-whitespace span after spans[startIdx].
+     * Returns -1 when none exists.
+     */
+    const nextSig = startIdx => {
+        for (let j = startIdx + 1; j < n; j++)
+            if (!isWS(spans[j])) return j;
+        return -1;
+    };
+
+    /**
+     * Given startIdx — the index of a pun-span whose text starts with '(' —
+     * return the index of the pun-span containing the matching ')'.
+     * Counts each '(' and ')' character so nested parens are handled correctly.
+     * Returns -1 if no matching close-paren is found.
+     */
+    const findCloseParen = startIdx => {
+        let depth = 0;
+        for (let k = startIdx; k < n; k++) {
+            if (cls(spans[k]) !== 'pun') continue;
+            for (const ch of spans[k].textContent) {
+                if      (ch === '(')                  depth++;
+                else if (ch === ')' && --depth === 0) return k;
+            }
+        }
+        return -1;
+    };
+
+    // ── Pass 1 – identify function definitions ────────────────────────────────
+
+    /** name → anchor-id string  */
+    const defId = new Map();
+    /** name → the <span class="pln"> element that holds the function name  */
+    const defSpan = new Map();
+    /** Span elements that ARE definition names; used to avoid self-linking. */
+    const defSpanSet = new Set();
+
+    let braceDepth = 0;
+
+    for (let i = 0; i < n; i++) {
+        const sp   = spans[i];
+        const type = cls(sp);
+
+        // Track brace nesting via pun spans only — '{' and '}' in string/comment
+        // spans are therefore ignored, which is what we want.
+        if (type === 'pun') {
+            for (const ch of sp.textContent)
+                ch === '{' ? braceDepth++ : ch === '}' && braceDepth--;
+            continue;
+        }
+
+        // Only inspect plain-text spans at file scope (brace depth 0).
+        if (type !== 'pln' || braceDepth !== 0) continue;
+
+        const name = sp.textContent.trim();
+
+        // Span must contain exactly one valid C identifier (no embedded spaces).
+        if (!name || !/^[a-zA-Z_]\w*$/.test(name)) continue;
+
+        // ① The immediately following significant span must be a pun opening '('.
+        const openIdx = nextSig(i);
+        if (openIdx < 0 || cls(spans[openIdx]) !== 'pun' ||
+            !spans[openIdx].textContent.startsWith('(')) continue;
+
+        // ② Locate the matching close-paren.
+        const closeIdx = findCloseParen(openIdx);
+        if (closeIdx < 0) continue;
+
+        // ③ The next significant span after ')' must be a pun opening '{'.
+        //    This distinguishes a definition from a prototype/forward declaration.
+        const braceIdx = nextSig(closeIdx);
+        if (braceIdx < 0 || cls(spans[braceIdx]) !== 'pun' ||
+            !spans[braceIdx].textContent.startsWith('{')) continue;
+
+        // ✓ Confirmed function definition — record it (first occurrence wins).
+        if (!defId.has(name)) {
+            defId   .set(name, 'def_' + name);
+            defSpan .set(name, sp);
+            defSpanSet.add(sp);
+        }
+    }
+
+    // ── Pass 2 – insert anchor targets before each definition's name span ─────
+    // Guard: if an anchor with this id already exists (inserted by a prior call),
+    // skip — this makes the function safe to invoke more than once.
+    defSpan.forEach((sp, name) => {
+        const anchorId = defId.get(name);
+        if (document.getElementById(anchorId)) return;   // ← idempotency guard
+        const anchor  = document.createElement('a');
+        anchor.id     = anchorId;
+        anchor.name   = anchorId;          // HTML 4 / legacy browser support
+        sp.parentNode.insertBefore(anchor, sp);
+    });
+
+    // ── Pass 3 – wrap call-site identifiers in links ──────────────────────────
+    for (let i = 0; i < n; i++) {
+        const sp = spans[i];
+        if (cls(sp) !== 'pln') continue;
+
+        const name = sp.textContent.trim();
+        if (!name || !/^[a-zA-Z_]\w*$/.test(name)) continue;
+
+        // Never self-link: skip the span that IS the definition.
+        if (defSpanSet.has(sp)) continue;
+
+        // Only create links to functions defined somewhere in this document.
+        if (!defId.has(name)) continue;
+
+        // Must be followed by a '(' to qualify as a call site.
+        const openIdx = nextSig(i);
+        if (openIdx < 0 || cls(spans[openIdx]) !== 'pun' ||
+            !spans[openIdx].textContent.startsWith('(')) continue;
+
+        // Guard: skip spans already wrapped by a prior call.
+        if (sp.querySelector('a')) continue;             // ← idempotency guard
+
+        // ✓ Call site — replace the span's text with:
+        //   [leading whitespace] + <a href="#def_name">name</a> + [trailing whitespace]
+        // Preserving surrounding whitespace keeps code formatting intact.
+        const raw   = sp.textContent;
+        const start = raw.indexOf(name);
+
+        const link        = document.createElement('a');
+        link.href         = '#' + defId.get(name);
+        link.textContent  = name;
+
+        sp.textContent = '';          // clear existing text node
+        if (start > 0)
+            sp.appendChild(document.createTextNode(raw.slice(0, start)));
+        sp.appendChild(link);
+        const tail = raw.slice(start + name.length);
+        if (tail)
+            sp.appendChild(document.createTextNode(tail));
+    }
+}
+
 // ------------------------------------------------------------------------------------------------------------------------
 // The MIT License (MIT)
 // Copyright (c) 2012 Artur B. Adib
@@ -463,7 +645,10 @@ var PR=win['PR']={'createSimpleLexer':createSimpleLexer,'registerLangHandler':re
     tableEl.className = 'table table-striped table-bordered';
   }
 
+  addFunctionLinks();
+
   // All done - show body
   document.body.style.display = '';
 
 })(window, document);
+
