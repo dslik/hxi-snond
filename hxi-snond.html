@@ -75,8 +75,8 @@ section 7.4.3.
     #define C_UUID_HYPHEN_4     23U         // Byte offset of fourth hyphen
     
     // HXi HID device identifiers
-    #define C_HXI_VENDOR_ID     0x1b1c      // Corsair USB vendor identifier
-    #define C_HXI_PRODUCT_ID    0x1c1e      // HX1000i USB product identifier
+    #define C_HXI_VENDOR_ID     0x1b1cU     // Corsair USB vendor identifier
+    #define C_HXI_PRODUCT_ID    0x1c1eU     // HX1000i USB product identifier
     
     // HXi HID packet layout
     #define C_HXI_PACKET_LEN    64U         // All HID packets are 64 bytes
@@ -814,10 +814,12 @@ Other changes to system state include:
     // with binary exponents; floating-point is required to faithfully represent the full range.
     int32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage)
     {
-        uint8_t     command[64] = {0};
-        uint8_t     response[64] = {0};
+        uint8_t     command[C_HXI_PACKET_LEN] = {0};
+        uint8_t     response[C_HXI_PACKET_LEN] = {0};
         uint16_t    reg_contents = 0;
         
+        REQUIRES(dev_fd >= 0, "Invalid file descriptor %d", dev_fd);
+        REQUIRES(rail <= C_HXI_RAIL_12V, "Rail index %u out of range", rail);
         REQUIRES(NULL != wattage, "NULL pointer passed for wattage");
 
         if(C_FAILURE == hxi_select_rail(dev_fd, rail))
@@ -1068,31 +1070,29 @@ Other changes to system state include:
 
     char* iso8601_time(char* buf, size_t len)
     {
-        struct timespec     ts;
-        struct tm           t;
+        struct timespec     ts = {0};
+        struct tm           utc_time = {0};;
         
-        if(buf == NULL || len < C_ISO8601_LEN)
-        {
-            return(NULL);
-        }
-        
+        REQUIRES(NULL != buf, "NULL pointer passed for buf");
+        REQUIRES(len >= C_ISO8601_LEN, "Buffer length %zu is smaller than required %u", len, C_ISO8601_LEN);
+
         if(0 != clock_gettime(CLOCK_REALTIME, &ts))
         {
             return(NULL);
         }
         
-        if(NULL == gmtime_r(&ts.tv_sec, &t))
+        if(NULL == gmtime_r(&ts.tv_sec, &utc_time))
         {
             return(NULL);
         }
         
         snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02d.%06ldZ",
-            t.tm_year + 1900,
-            t.tm_mon  + 1,
-            t.tm_mday,
-            t.tm_hour,
-            t.tm_min,
-            t.tm_sec,
+            utc_time.tm_year + 1900,
+            utc_time.tm_mon  + 1,
+            utc_time.tm_mday,
+            utc_time.tm_hour,
+            utc_time.tm_min,
+            utc_time.tm_sec,
             (long) (ts.tv_nsec / 1000L));
         
         ENSURES(NULL != buf, "buf is unexpectedly NULL on success path");
