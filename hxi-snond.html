@@ -1,4 +1,4 @@
-//#<!DOCTYPE html><html><title>HXi Power Supply Sensor Daemon</title><xmp theme="united" style="display:none;">
+//<!DOCTYPE html><html><title>HXi Power Supply Sensor Daemon</title><xmp theme="united" style="display:none;">
 /*
 ## Overview
 
@@ -40,10 +40,10 @@ Known issues:
     #include <signal.h>         // sigaction, sigemptyset, raise, SIGINT, SA_RESTART, struct sigaction
     #include <sys/ioctl.h>      // ioctl
     #include <sys/stat.h>       // fstat, mkdir, struct stat, S_IRUSR, S_IWUSR, S_IRWXU
-
+    
     // Linux includes
     #include <linux/hidraw.h>   // HIDIOCGRAWINFO, struct hidraw_devinfo
-
+    
     // Local includes
     #include "dbc.h"            // Design-by-contract library
     #include "cJSON.h"          // cJSON library
@@ -62,10 +62,10 @@ section 7.4.3.
     // General
     #define C_SUCCESS           0           // Function return indicating success
     #define C_FAILURE           (-1)        // Function return indicating failure
-
+    
     // ISO 8601 timestamp
     #define C_ISO8601_LEN       28U         // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
-
+    
     // RFC 4122 UUID
     #define C_UUID_STRLEN       36U         // Character count of a UUID string (no null)
     #define C_UUID_LEN          37U         // Buffer size including null terminator
@@ -73,11 +73,11 @@ section 7.4.3.
     #define C_UUID_HYPHEN_2     13U         // Byte offset of second hyphen
     #define C_UUID_HYPHEN_3     18U         // Byte offset of third  hyphen
     #define C_UUID_HYPHEN_4     23U         // Byte offset of fourth hyphen
-
+    
     // HXi HID device identifiers
     #define C_HXI_VENDOR_ID     0x1b1c      // Corsair USB vendor identifier
     #define C_HXI_PRODUCT_ID    0x1c1e      // HX1000i USB product identifier
-
+    
     // HXi HID packet layout
     #define C_HXI_PACKET_LEN    64U         // All HID packets are 64 bytes
     #define C_HXI_RAIL_CMD_LEN  0x02U       // Length byte in a rail-select packet
@@ -85,12 +85,12 @@ section 7.4.3.
     #define C_HXI_RAIL_OK       0x00U       // Response status byte: success
     #define C_HXI_PWR_CMD_LEN   0x03U       // Length byte in a power-read packet
     #define C_HXI_PWR_READ_CMD  0x96U       // Command byte: read wattage
-
+    
     // HXi output rail indices
     #define C_HXI_RAIL_3V3      0U          // 3.3 V output rail index
     #define C_HXI_RAIL_5V       1U          // 5 V output rail index
     #define C_HXI_RAIL_12V      2U          // 12 V output rail index
-
+    
     // PMBus LINEAR11 register field constants
     #define C_L11_EXP_SHIFT     11U         // Bit position of the 5-bit exponent field
     #define C_L11_MANT_MASK     0x07FFU     // Mask for the 11-bit mantissa field [10:0]
@@ -98,9 +98,9 @@ section 7.4.3.
     #define C_L11_EXP_SEXT_MASK 0xFFE0U     // Sign-extension mask for a 5-bit exponent
     #define C_L11_MANT_SIGN_BIT 0x0400U     // Sign bit within the 11-bit mantissa (bit 10)
     #define C_L11_MANT_SEXT_MSK 0xFFFFF800U // Sign-extension mask for 11-bit mantissa
-
+    
     // Polling interval for hxi_collect_values
-    #define C_POLL_INTERVAL_NS  100000000   // 100 ms in nanoseconds (type int, assigned to long tv_nsec)
+    #define C_POLL_INTERVAL_NS  100000000L  // 100 ms in nanoseconds (type int, assigned to long tv_nsec)
 
 /*
 ### Project prototypes
@@ -115,11 +115,16 @@ Local functions
     int32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage);
     int32_t hxi_select_rail(int dev_fd, uint8_t rail);
     double reg_to_value(uint16_t reg);
-    bool is_valid_uuid(char* uuid_value);
+    bool is_valid_uuid(const char* uuid_value);
     int32_t generate_random_uuid(char* uuid_value);
     char* iso8601_time(char* buf, size_t len);
     static void signal_handler(int signum);
 
+/*
+### Project globals
+
+Global variables
+*/
 
     // Global Variables
     const char* g_usage = "Usage: hxi-snond [options]\n"
@@ -130,9 +135,8 @@ Local functions
                           "  -c CONFIG   JSON Configuration file that specifies which sensors to read\n"
                           "  -u UUID     Device UUID (default: randomly generated)\n"
                           "  -h          Show this help message\n";
-
+    
     static volatile sig_atomic_t g_abort_collect = false;
-
 
 /*
 ## HXi sensor daemon entry point
@@ -185,12 +189,12 @@ Other changes to system state include:
         char                    working_string[1024] = {0};
         size_t                  output_len = 0U;
         ssize_t                 bytes_written = 0;
-
+        
         // Obtain command line arguments
         while(C_FAILURE != opt)
         {
             opt = getopt(argc, argv, "d:o:c:u:h");
-
+            
             switch(opt)
             {
                 case 'd':
@@ -234,7 +238,7 @@ Other changes to system state include:
                 }
             }
         }
-
+        
         // ===========================================================
         // Validate Inputs
         if(C_FAILURE == access(device_name, R_OK | W_OK))
@@ -243,37 +247,37 @@ Other changes to system state include:
             perror(device_name);
             return(EXIT_FAILURE);
         }
-
+        
         if(C_FAILURE == access(output_path, R_OK | W_OK))
         {
             fprintf(stderr,"Error accessing specified output directory: %s\n", output_path);
             perror(output_path);
             return(EXIT_FAILURE);
         }
-
+        
         if(C_FAILURE == access(config_path, R_OK))
         {
             fprintf(stderr,"Error accessing specified config file: %s\n", config_path);
             perror(config_path);
             return(EXIT_FAILURE);
         }
-
+        
         // Ensure that the output directory ends with a "/"
         if('/' != output_path[strlen(output_path) - 1])
         {
             fprintf(stderr,"Specified output directory does not end with a '/': %s\n", output_path);
             return(EXIT_FAILURE);
         }
-
+        
         // Validate or generate UUID
         if(NULL != uuid_arg)
         {
-            if(false == is_valid_uuid((char*) uuid_arg))
+            if(false == is_valid_uuid(uuid_arg))
             {
                 fprintf(stderr,"Invalid UUID format: %s\n", uuid_arg);
                 return(EXIT_FAILURE);
             }
-
+            
             memcpy(device_uuid, uuid_arg, sizeof(device_uuid));
         }
         else
@@ -284,11 +288,11 @@ Other changes to system state include:
                 return(EXIT_FAILURE);
             }
         }
-
+        
         // ===========================================================
         // Initialize a connecion to the HXi Power Supply
         dev_fd = open(device_name, O_RDWR);
-
+        
         memset(&hid_info, 0, sizeof(hid_info));
         if(C_FAILURE == ioctl(dev_fd, HIDIOCGRAWINFO, &hid_info))
         {
@@ -297,39 +301,38 @@ Other changes to system state include:
             close(dev_fd);
             return(EXIT_FAILURE);
         }
-          
+        
         if(C_HXI_VENDOR_ID != hid_info.vendor)
         {
             fprintf(stderr, "Unexpected HID vendor '0x%04x' (expected 0x%04x)\n", hid_info.vendor, C_HXI_VENDOR_ID);
             close(dev_fd);
             return(EXIT_FAILURE);
         }
-
+        
         if(C_HXI_PRODUCT_ID != hid_info.product)
         {
             fprintf(stderr, "Unexpected HID product '0x%04x' (expected 0x%04x)\n", hid_info.product, C_HXI_PRODUCT_ID);
             close(dev_fd);
             return(EXIT_FAILURE);
         }
-
+        
         // ===========================================================
         // Read a configuration JSON file that specifies which sensors
         // should be collected
-        config_json = json_load_file((char*) config_path);
+        config_json = json_load_file(config_path);
         snon_output = cJSON_PrintUnformatted(config_json);
 
+        // FIXME - Process config file
         
-
-
         // ===========================================================
         // Create SNON device and sensor records if they do not exist
         snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, device_uuid);
-
+        
         if(C_FAILURE == access(snon_path, R_OK | W_OK))
         {
             // Create a new SNON device object
             snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-
+            
             if(C_FAILURE == snon_fd)
             {
                 fprintf(stderr, "Error creating SNON device record file: %s\n", snon_path);
@@ -337,21 +340,21 @@ Other changes to system state include:
                 close(dev_fd);
                 return(EXIT_FAILURE);
             }
-
+            
             // Create a new device record
             snon_root = cJSON_CreateObject();
             ASSERT(NULL != snon_root, "cJSON_CreateObject() returned NULL; memory exhausted");
-
+            
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
             cJSON_AddItemToObjectCS(snon_root, "eID", cJSON_CreateString(working_string));
             cJSON_AddItemToObjectCS(snon_root, "eC", cJSON_CreateString("device"));
             snon_addname(snon_root, "eN", "*", "HX1000i Power Supply");
             snon_output = cJSON_PrintUnformatted(snon_root);
-
+            
             output_len = strlen(snon_output);
             bytes_written = write(snon_fd, snon_output, output_len);
-
-            // ASGFC-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with
+            
+            // ASDFG-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with
             // output_len (size_t); safe because bytes_written is checked for < 0 first.
             if((bytes_written < 0) || ((size_t) bytes_written != output_len))
             {
@@ -363,41 +366,49 @@ Other changes to system state include:
                 close(dev_fd);
                 return(EXIT_FAILURE);
             }
-
+            
             cJSON_free(snon_output);
             cJSON_Delete(snon_root);
             close(snon_fd);
-
+            
             // Create a new SNON sensor object
-            if(-1 == generate_random_uuid(sensor_uuid))
+            if(C_FAILURE == generate_random_uuid(sensor_uuid))
             {
                 fprintf(stderr,"Error generating random UUID\n");
                 return(EXIT_FAILURE);
             }
-
+            
             snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, sensor_uuid);
             snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
 
+            if(C_FAILURE == snon_fd)
+            {
+                fprintf(stderr, "Error creating SNON sensor record file: %s\n", snon_path);
+                perror("open");
+                close(dev_fd);
+                return(EXIT_FAILURE);
+            }
+            
             // Create a new sensor record
             snon_root = cJSON_CreateObject();
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", sensor_uuid);
             cJSON_AddItemToObjectCS(snon_root, "eID", cJSON_CreateString(working_string));
             cJSON_AddItemToObjectCS(snon_root, "eC", cJSON_CreateString("sensor"));
             snon_addname(snon_root, "eN", "*", "3.3V Rail Power");
-
+            
             relation_array = cJSON_CreateArray();
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
             cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
-
+            
             relation_object = cJSON_CreateObject();
             cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
             cJSON_AddItemToObjectCS(snon_root, "eR", relation_object);
             snon_output = cJSON_PrintUnformatted(snon_root);
-
+            
             output_len = strlen(snon_output);
             bytes_written = write(snon_fd, snon_output, output_len);
-
-            // ASGFC-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with
+            
+            // ASDFG-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with
             // output_len (size_t); safe because bytes_written is checked for < 0 first.
             if((bytes_written < 0) || ((size_t) bytes_written != output_len))
             {
@@ -409,33 +420,33 @@ Other changes to system state include:
                 close(dev_fd);
                 return(EXIT_FAILURE);
             }
-
+            
             // Create sensor directory
             snprintf(snon_path, sizeof(snon_path), "%s/%s", output_path, sensor_uuid);
-            if(-1 == mkdir(snon_path, S_IRWXU))
+            if(C_FAILURE == mkdir(snon_path, S_IRWXU))
             {
                 fprintf(stderr,"Error creating sensor directory\n");
                 perror("mkdir");
                 return(EXIT_FAILURE);
             }
-
+            
             cJSON_free(snon_output);
             cJSON_Delete(snon_root);
             close(snon_fd);
         }
-
+        
         // ===========================================================
         // Obtain HXi Power Supply Information
         
         iso8601_time(working_string, sizeof(working_string));
         snprintf(snon_path, sizeof(snon_path), "%s/%s/%s-%s.json", output_path, sensor_uuid, sensor_uuid, working_string);
 
-        if(-1 == hxi_collect_values(snon_path, dev_fd, sensor_uuid))
+        if(C_FAILURE == hxi_collect_values(snon_path, dev_fd, sensor_uuid))
         {
             fprintf(stderr,"Error writing SNON value record\n");
             return(EXIT_FAILURE);
         }
-
+        
         close(dev_fd);
         return(EXIT_SUCCESS);
     }
@@ -468,15 +479,15 @@ Other changes to system state include:
     void snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name)
     {
         cJSON*  name_object = NULL;
-
+        
         REQUIRES(NULL != snon_object, "NULL pointer passed for snon_object");
         REQUIRES(NULL != field, "NULL pointer passed for field");
         REQUIRES(NULL != lang, "NULL pointer passed for lang");
         REQUIRES(NULL != name, "NULL pointer passed for name");
-
+        
         name_object = cJSON_CreateObject();
         ASSERT(NULL != name_object, "cJSON_CreateObject() returned NULL; memory exhausted");
-
+        
         cJSON_AddItemToObjectCS(name_object, lang, cJSON_CreateString(name));
         cJSON_AddItemToObjectCS(snon_object, field, name_object);
     }
@@ -517,17 +528,17 @@ Other changes to system state include:
         ssize_t         bytes_read = 0;
         cJSON*          json_contents = NULL;
         const char*     error_ptr = NULL;
-
+        
         REQUIRES(NULL != json_file_path, "NULL pointer passed for json_file_path");
-
+        
         json_fd = open(json_file_path, O_RDONLY);
-
+        
         if(C_FAILURE == json_fd)
         {
             fprintf(stderr,"Unable to open JSON file '%s'.\n", json_file_path);
             return(NULL);
         }
-
+        
         // Get file size
         if(C_FAILURE == fstat(json_fd, &file_stat))
         {
@@ -537,41 +548,43 @@ Other changes to system state include:
         }
         
         file_length = file_stat.st_size;
-
-        // ASGFC-C 2026 5.25: VIOLATION: cast from off_t to size_t to pass to
+        
+        // ASDFG-C 2026 5.25: VIOLATION: cast from off_t to size_t to pass to
         // malloc and read; safe because file_length is non-negative (fstat succeeds).
         read_buffer = malloc((size_t) (file_length + 1));
-
+        
         if(NULL == read_buffer)
         {
             fprintf(stderr,"Unable to allocate %ld bytes of memory to read JSON file.\n", file_length);
             close(json_fd);
             return(NULL);
         }
-
+        
         // Read the file's contents
         bytes_read = read(json_fd, read_buffer, (size_t) file_length);
         close(json_fd);
-
+        
         if(bytes_read != file_length)
         {
             fprintf(stderr,"Unable to read file, expected %ld bytes, got %ld bytes.\n", file_length, bytes_read);
             free(read_buffer);
             return(NULL);
         }
-
+        
         read_buffer[file_length] = '\0';
-
+        
         // Parse the contents of the file
         json_contents = cJSON_Parse(read_buffer);
         free(read_buffer);
-
+        
         if(NULL == json_contents)
         {
             error_ptr = cJSON_GetErrorPtr();
             fprintf(stderr, "Error parsing JSON file '%s' near: %s\n", json_file_path, error_ptr);
             return(NULL);
         }
+        
+        ENSURES(NULL != json_contents, "Parsed JSON is NULL on success path");
 
         return(json_contents);
     }
@@ -611,7 +624,7 @@ Other changes to system state include:
     {
         double              wattage = 0.0;
         int                 snon_fd = -1;
-        char*               snon_output;
+        char*               snon_output = NULL;
         char                working_string[64] = {0};
         struct sigaction    signal_action = {0};
         bool                first_record = true;
@@ -619,81 +632,89 @@ Other changes to system state include:
         cJSON*              entry = NULL;
         size_t              data_len = 0U;
         ssize_t             data_written_len = 0;
+        struct timespec     poll_interval = {0, C_POLL_INTERVAL_NS};
+        
+        REQUIRES(NULL != snon_path, "NULL pointer passed for snon_path");
+        REQUIRES(NULL != uuid_value, "NULL pointer passed for uuid_value");
+        REQUIRES(dev_fd >= 0, "Invalid file descriptor %d", dev_fd);
 
-        if (0 != access(snon_path, R_OK | W_OK))
+        if(C_FAILURE == access(snon_path, R_OK | W_OK))
         {
             // Set up a signal handler to end data collection
             signal_action.sa_handler = signal_handler;
             signal_action.sa_flags = SA_RESTART;
-
+            
             sigemptyset(&signal_action.sa_mask);
-            if (-1 == sigaction(SIGINT, &signal_action, NULL))
+            if(C_FAILURE == sigaction(SIGINT, &signal_action, NULL))
             {
                 fprintf(stderr, "Error setting up signal handler\n");
                 perror("sigaction");
-                return(-1);
+                return(C_FAILURE);
             }
-
+    
             // Create the sensor record file
             snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-            if (-1 == snon_fd)
+            if(C_FAILURE == snon_fd)
             {
                 fprintf(stderr, "Error creating sensor record file\n");
                 perror("open");
-                return(-1);
+                return(C_FAILURE);
             }
-
+            
             senml_array = cJSON_CreateArray();
-
-            while (g_abort_collect == false)
+            
+            while(g_abort_collect == false)
             {
                 iso8601_time(working_string, sizeof(working_string));
-
-                if (-1 == hxi_read_power(dev_fd, 0, &wattage))
+                
+                if(C_FAILURE == hxi_read_power(dev_fd, C_HXI_RAIL_3V3, &wattage))
                 {
                     fprintf(stderr, "Error reading wattage value\n");
                     cJSON_Delete(senml_array);
                     close(snon_fd);
-                    return(-1);
+                    return(C_FAILURE);
                 }
-
+                
                 entry = cJSON_CreateObject();
-
-                if (first_record)
+                
+                if(first_record)
                 {
                     snprintf(working_string, sizeof(working_string), "urn:uuid:%s", uuid_value);
                     cJSON_AddItemToObjectCS(entry, "bn", cJSON_CreateString(working_string));
                     first_record = false;
                 }
-
+                
                 cJSON_AddItemToObjectCS(entry, "v", cJSON_CreateNumber(wattage));
                 cJSON_AddItemToObjectCS(entry, "t", cJSON_CreateString(working_string));
                 cJSON_AddItemToArray(senml_array, entry);
-
-                usleep(100000);
+                
+                nanosleep(&poll_interval, NULL);
             }
-
+            
             // When abort signal received
             snon_output = cJSON_PrintUnformatted(senml_array);
-
+            
             data_len = strlen(snon_output);
             data_written_len = write(snon_fd, snon_output, data_len);
-            if ((size_t) data_written_len != data_len)
+
+            // ASDFG-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with data_len
+            // (size_t); safe because data_written_len is checked for < 0 first.
+            if((data_written_len < 0) || ((size_t) data_written_len != data_len))
             {
                 fprintf(stderr, "Error writing SNON value record\n");
                 perror("SNON write");
                 cJSON_free(snon_output);
                 cJSON_Delete(senml_array);
                 close(snon_fd);
-                return(-1);
+                return(C_FAILURE);
             }
-
+            
             cJSON_free(snon_output);
             cJSON_Delete(senml_array);
             close(snon_fd);
         }
-
-        return(0);
+        
+        return(C_SUCCESS);
     }
 
 /*
@@ -723,43 +744,44 @@ Other changes to system state include:
 
     int32_t hxi_select_rail(int dev_fd, uint8_t rail)
     {
-        uint8_t     command[64];
-        uint8_t     response[64];
+        uint8_t     command[C_HXI_PACKET_LEN] = {0};
+        uint8_t     response[C_HXI_PACKET_LEN] = {0};
+        
+        REQUIRES(dev_fd >= 0, "Invalid file descriptor %d", dev_fd);
+        REQUIRES(rail <= C_HXI_RAIL_12V, "Rail index %u out of range", rail);
 
         // Select the output rail to read
-        memset(&command, 0, sizeof(command));
-        memset(&response, 0, sizeof(response));
-        command[0] = 0x02;
-        command[1] = 0x00;  // Select Rail
-        command[2] = rail;  // Desired Rail
-
+        command[0] = C_HXI_RAIL_CMD_LEN;
+        command[1] = C_HXI_RAIL_SEL_CMD;    // Select Rail
+        command[2] = rail;                  // Desired Rail
+        
         if(sizeof(command) != write(dev_fd, command, sizeof(command)))
         {
             fprintf(stderr,"Error writing command to device\n");
             perror("Command Write");
-            return(-1);
+            return(C_FAILURE);
         }
-
+        
         if(sizeof(response) != read(dev_fd, response, sizeof(response)))
         {
             fprintf(stderr,"Error reading response from device\n");
             perror("Command Read");
-            return(-1);
+            return(C_FAILURE);
         }
-
-        if(0x02 != response[0])
+        
+        if(C_HXI_RAIL_CMD_LEN != response[0])
         {
-            fprintf(stderr,"Unexpected response length %i (expected 2)\n", response[0]);
-            return(-1);
+            fprintf(stderr,"Unexpected response length %i (expected %i)\n", response[0], C_HXI_RAIL_CMD_LEN);
+            return(C_FAILURE);
         }
-
-         if(0x00 != response[1])
+        
+        if(C_HXI_RAIL_OK != response[1])
         {
-            fprintf(stderr,"Unexpected response type '0x%02x' (expected 0x00)\n", response[1]);
-            return(-1);
+            fprintf(stderr,"Unexpected response type '0x%02x' (expected 0x%02x)\n", response[1], C_HXI_RAIL_OK);
+            return(C_FAILURE);
         }
-
-        return(0);
+        
+        return(C_SUCCESS);
     }
 
 /*
@@ -788,52 +810,57 @@ Other changes to system state include:
 
 */
 
+    // ASDFG-C 2026 5.15: VIOLATION: PMBus LINEAR11 decoded power values are rational numbers
+    // with binary exponents; floating-point is required to faithfully represent the full range.
     int32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage)
     {
-        uint8_t     command[64];
-        uint8_t     response[64];
+        uint8_t     command[64] = {0};
+        uint8_t     response[64] = {0};
         uint16_t    reg_contents = 0;
+        
+        REQUIRES(NULL != wattage, "NULL pointer passed for wattage");
 
-        if(-1 == hxi_select_rail(dev_fd, rail))
+        if(C_FAILURE == hxi_select_rail(dev_fd, rail))
         {
             fprintf(stderr,"Unable to select output rail\n");
-            return(-1);
+            return(C_FAILURE);
         }
-
-        memset(&command, 0, sizeof(command));
-        memset(&response, 0, sizeof(response));
-        command[0] = 0x03;
-        command[1] = 0x96;  // Read Power
+        
+        command[0] = C_HXI_PWR_CMD_LEN;
+        command[1] = C_HXI_PWR_READ_CMD;    // Read Power
         if(sizeof(command) != write(dev_fd, command, sizeof(command)))
         {
             fprintf(stderr,"Error writing command to device\n");
             perror("Command Write");
-            return(-1);
+            return(C_FAILURE);
         }
-
+        
         if(sizeof(response) != read(dev_fd, response, sizeof(response)))
         {
             fprintf(stderr,"Error reading response from device\n");
             perror("Command Read");
-            return(-1);
+            return(C_FAILURE);
         }
-
-        if(0x03 != response[0])
+        
+        if(C_HXI_PWR_CMD_LEN != response[0])
         {
-            fprintf(stderr,"Unexpected response length %i (expected 3)\n", response[0]);
-            return(-1);
+            fprintf(stderr,"Unexpected response length %i (expected %i)\n", response[0], C_HXI_PWR_CMD_LEN);
+            return(C_FAILURE);
         }
-
-         if(0x96 != response[1])
+        
+        if(C_HXI_PWR_READ_CMD != response[1])
         {
-            fprintf(stderr,"Unexpected response type '0x%02x' (expected 0x96)\n", response[1]);
-            return(-1);
+            fprintf(stderr,"Unexpected response type '0x%02x' (expected 0x%02x)\n", response[1], C_HXI_PWR_READ_CMD);
+            return(C_FAILURE);
         }
-
-        reg_contents = response[2] + (response[3] << 8);
+        
+        // ASDFG-C 2026 5.25: VIOLATION: Cast required to assemble uint16_t from two uint8_t bytes.
+        reg_contents = (uint16_t) ((uint16_t) response[2] | ((uint16_t) response[3] << 8U));
         *wattage = reg_to_value(reg_contents);
+        
+        ENSURES(*wattage >= 0.0, "Decoded wattage is unexpectedly negative: %f", *wattage);
 
-        return(0);
+        return(C_SUCCESS);
     }
 
 /*
@@ -862,24 +889,26 @@ Bit layout of the 16-bit register word:
 
 */
 
+    // ASDFG-C 2026 5.15: VIOLATION: PMBus LINEAR11 values are rational numbers with
+    // binary exponents; floating-point is the most faithful representation.
     double reg_to_value(uint16_t reg)
     {
-        int16_t exponent;
-        int32_t mantissa;
-        double value;
-
-        exponent = (int16_t) reg >> 11;
-        mantissa = ((int16_t) ((reg & 0x7ff) << 5)) >> 5;
-
+        int16_t exponent = 0;
+        int32_t mantissa = 0;
+        double value = 0.0;
+        
+        exponent = (int16_t) reg >> C_L11_EXP_SHIFT;
+        mantissa = ((int16_t) ((reg & C_L11_MANT_MASK) << 5)) >> 5;
+        
         if(exponent >= 0)
         {
-            value = (double) mantissa * (1L << exponent);
+            value = (double) mantissa * (double) (1L << (int) exponent);
         }
         else
         {
-            value = (double) mantissa / (1L << -exponent);
+            value = (double) mantissa / (double) (1L << (int) (-exponent));
         }
-
+        
         return(value);
     }
 
@@ -904,35 +933,40 @@ UTF-8 string handling requirement of Rule 1.2.
 
 */
 
-    bool is_valid_uuid(char* uuid_value)
+    bool is_valid_uuid(const char* uuid_value)
     {
-        uint32_t i = 0;
+        uint32_t char_index = 0;
+        
+        REQUIRES(NULL != uuid_value, "NULL pointer passed for uuid_value");
 
-        if(36 != strlen(uuid_value))
+        if(C_UUID_STRLEN != strlen(uuid_value))
         {
             return(false);
         }
-
-        while(i < 36)
+        
+        while(char_index < C_UUID_STRLEN)
         {
-            if(8 == i || 13 == i || 18 == i || 23 == i)
+            if(C_UUID_HYPHEN_1 == char_index 
+               || C_UUID_HYPHEN_2 == char_index 
+               || C_UUID_HYPHEN_3 == char_index
+               || C_UUID_HYPHEN_4 == char_index)
             {
-                if('-' != uuid_value[i])
+                if('-' != uuid_value[char_index])
                 {
-                    return false;
+                    return(false);
                 }
             }
             else
             {
-                if(0 == isxdigit((unsigned char) uuid_value[i]))
+                if(0 == isxdigit((unsigned char) uuid_value[char_index]))
                 {
-                    return false;
+                    return(false);
                 }
             }
-
-            i = i + 1;
+            
+            char_index = char_index + 1;
         }
-
+        
         return(true);
     }
 
@@ -963,32 +997,34 @@ Other changes to system state include:
 
     int32_t generate_random_uuid(char* uuid_value)
     {
-        uint8_t     uuid_bytes[16];
+        uint8_t     uuid_bytes[16] = {0};
         int         urandom_fd = -1;
+        
+        REQUIRES(NULL != uuid_value, "NULL pointer passed for uuid_value");
 
         urandom_fd = open("/dev/urandom", O_RDONLY);
-
-        if(-1 == urandom_fd)
+        
+        if(C_FAILURE == urandom_fd)
         {
             fprintf(stderr,"Unable to open /dev/urandom for UUID generation\n");
             perror("/dev/urandom");
-            return(-1);
+            return(C_FAILURE);
         }
-
-        if((ssize_t)sizeof(uuid_bytes) != read(urandom_fd, uuid_bytes, sizeof(uuid_bytes)))
+        
+        if((ssize_t) sizeof(uuid_bytes) != read(urandom_fd, uuid_bytes, sizeof(uuid_bytes)))
         {
             fprintf(stderr,"Unable to read from /dev/urandom for UUID generation\n");
             perror("/dev/urandom");
             close(urandom_fd);
-            return(-1);
+            return(C_FAILURE);
         }
-
+        
         close(urandom_fd);
-
-        uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x40;  // Version 4
-        uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80;  // Variant 1
-
-        snprintf(uuid_value, 37,
+        
+        uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x40U; // Version 4
+        uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80U; // Variant 1
+        
+        snprintf(uuid_value, C_UUID_LEN,
             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
             uuid_bytes[0],  uuid_bytes[1],  uuid_bytes[2],  uuid_bytes[3],
             uuid_bytes[4],  uuid_bytes[5],
@@ -996,8 +1032,10 @@ Other changes to system state include:
             uuid_bytes[8],  uuid_bytes[9],
             uuid_bytes[10], uuid_bytes[11], uuid_bytes[12],
             uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]);
+        
+        ENSURES(C_UUID_STRLEN == strlen(uuid_value), "Generated UUID has unexpected length %zu", strlen(uuid_value));
 
-        return(0);
+        return(C_SUCCESS);
     }
 
 /*
@@ -1032,22 +1070,22 @@ Other changes to system state include:
     {
         struct timespec     ts;
         struct tm           t;
-
+        
         if(buf == NULL || len < C_ISO8601_LEN)
         {
             return(NULL);
         }
-
+        
         if(0 != clock_gettime(CLOCK_REALTIME, &ts))
         {
             return(NULL);
         }
-
+        
         if(NULL == gmtime_r(&ts.tv_sec, &t))
         {
             return(NULL);
         }
-
+        
         snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02d.%06ldZ",
             t.tm_year + 1900,
             t.tm_mon  + 1,
@@ -1055,7 +1093,9 @@ Other changes to system state include:
             t.tm_hour,
             t.tm_min,
             t.tm_sec,
-            (long)(ts.tv_nsec / 1000L));
+            (long) (ts.tv_nsec / 1000L));
+        
+        ENSURES(NULL != buf, "buf is unexpectedly NULL on success path");
 
         return(buf);
     }
@@ -1091,7 +1131,7 @@ Other changes to system state include:
     static void signal_handler(int signum)
     {
         struct sigaction    signal_action = {0};
-
+        
         if(SIGINT == signum)
         {
             // Set an abort flag for sigint

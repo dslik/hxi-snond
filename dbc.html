@@ -1,4 +1,4 @@
-//#<!DOCTYPE html><html><title>Design-by-Contract Utility Library</title><xmp theme="united" style="display:none;">
+//<!DOCTYPE html><html><title>Design-by-Contract Utility Library</title><xmp theme="united" style="display:none;">
 /*
 ## Overview
 
@@ -86,7 +86,7 @@ Other changes to system state include:
 
         fprintf(stderr, "\n  Stack trace:\n");
 
-        // ASGFC-C 2026 5.25: VIOLATION: Explicit casts required to convert to/from POSIX types
+        // ASDFG-C 2026 5.25: VIOLATION: Explicit casts required to convert to/from POSIX types
         frame_count = (uint32_t) backtrace(stack_frames, (int) C_STACK_DEPTH);
         stack_symbols = backtrace_symbols(stack_frames, (int) frame_count);
 
