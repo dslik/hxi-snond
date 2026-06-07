@@ -1,7 +1,6 @@
 //#<!DOCTYPE html><html><title>HXi Power Supply Sensor Daemon</title><xmp theme="united" style="display:none;">
 /*
-Overview
---------------------------
+## Overview
 
 Polls and writes sensor data from Corsair HXi series power supplies.
 Sensor data is written in SNON 4 SenML format. The daemon opens the
@@ -50,8 +49,7 @@ Known issues:
     #include "cJSON.h"          // cJSON library
 
 /*
-Project constants
------------------
+### Project constants
 
 HXi hardware identifiers are drawn from the USB vendor/product database.
 HXi protocol constants reflect the Corsair HID command set documented in
@@ -105,8 +103,7 @@ section 7.4.3.
     #define C_POLL_INTERVAL_NS  100000000   // 100 ms in nanoseconds (type int, assigned to long tv_nsec)
 
 /*
-Project prototypes
-------------------
+### Project prototypes
 
 Local functions
 */
@@ -138,8 +135,7 @@ Local functions
 
 
 /*
-HXi sensor daemon entry point
-------------------------------
+## HXi sensor daemon entry point
 
 Parses command-line arguments, opens and validates the HXi HID power
 supply device, creates initial SNON device and sensor records on first
@@ -150,8 +146,7 @@ The daemon runs until it receives a SIGINT signal, at which point the
 signal handler sets `g_abort_collect` and the collection loop exits
 cleanly on its next polling iteration.
 
-Interactions
-------------
+### Interactions
 
 | Parameter       | Direction | Type         | Description                                                                                         |
 | --------------- | --------- | ------------ | --------------------------------------------------------------------------------------------------- |
@@ -446,8 +441,7 @@ Other changes to system state include:
     }
 
 /*
-Add a localised name entry to a SNON object
---------------------------------------------
+## Add a localised name entry to a SNON object
 
 Creates a child JSON object containing a single language-keyed string
 entry and attaches it to the parent SNON object under the given field
@@ -455,8 +449,7 @@ key. Used to populate the `eN` (entity name) field in SNON records,
 following the SNON 4 name format where the field value is itself a JSON
 object mapping language tags to name strings.
 
-Interactions
-------------
+### Interactions
 
 | Parameter   | Direction | Type   | Description                                                        |
 | ----------- | --------- | ------ | ------------------------------------------------------------------ |
@@ -489,8 +482,7 @@ Other changes to system state include:
     }
 
 /*
-Read and parse a JSON file from disk
--------------------------------------
+## Read and parse a JSON file from disk
 
 Opens the file at json_file_path, allocates a heap buffer sized to the
 file contents, reads the entire file into the buffer, null-terminates
@@ -500,8 +492,7 @@ cJSON object on success or NULL on any I/O or parse failure.
 Ownership of the returned cJSON object passes to the caller, who must
 free it by calling cJSON_Delete.
 
-Interactions
-------------
+### Interactions
 
 | Parameter      | Direction | Type   | Description                                                   |
 | -------------- | --------- | ------ | ------------------------------------------------------------- |
@@ -586,8 +577,7 @@ Other changes to system state include:
     }
 
 /*
-Collect HXi power values and write a SNON SenML record
--------------------------------------------------------
+## Collect HXi power values and write a SNON SenML record
 
 Installs a SIGINT signal handler, creates a new SenML value record file
 at snon_path, then enters a polling loop. Each iteration reads the
@@ -598,8 +588,7 @@ in-memory cJSON array. The loop sleeps 100 ms between readings.
 The loop continues until g_abort_collect is set true by signal_handler.
 On exit, the completed SenML array is serialised and written to the file.
 
-Interactions
-------------
+### Interactions
 
 | Parameter       | Direction | Type         | Description                                                               |
 | --------------- | --------- | ------------ | ------------------------------------------------------------------------- |
@@ -708,8 +697,7 @@ Other changes to system state include:
     }
 
 /*
-Select the active output rail on the HXi power supply
-------------------------------------------------------
+## Select the active output rail on the HXi power supply
 
 Sends a two-byte rail-selection command packet (command byte 0x02,
 payload byte rail) to the HXi device over the HID raw interface, then
@@ -717,8 +705,7 @@ reads and validates the acknowledgement response. The device must reply
 with a two-byte response (length byte 0x02) and a status byte of 0x00
 indicating success.
 
-Interactions
-------------
+### Interactions
 
 | Parameter    | Direction | Type    | Description                                                             |
 | ------------ | --------- | ------- | ----------------------------------------------------------------------- |
@@ -776,16 +763,14 @@ Other changes to system state include:
     }
 
 /*
-Read the wattage from one output rail of the HXi power supply
--------------------------------------------------------------
+## Read the wattage from one output rail of the HXi power supply
 
 Selects the specified rail by calling hxi_select_rail, sends a power-read
 command (0x03, 0x96) to the HXi device, reads the raw two-byte PMBus
 LINEAR11 register from bytes [2] and [3] of the response payload, and
 converts the result to a double-precision wattage value via reg_to_value.
 
-Interactions
-------------
+### Interactions
 
 | Parameter    | Direction | Type    | Description                                                                |
 | ------------ | --------- | ------- | -------------------------------------------------------------------------- |
@@ -852,8 +837,7 @@ Other changes to system state include:
     }
 
 /*
-Decode a PMBus LINEAR11 register value to floating-point
----------------------------------------------------------
+## Decode a PMBus LINEAR11 register value to floating-point
 
 The PMBus LINEAR11 format encodes a value as a 16-bit word whose upper
 five bits [15:11] hold a signed 5-bit exponent $N$ and whose lower
@@ -869,8 +853,7 @@ Bit layout of the 16-bit register word:
 | 15:11 | Exponent | 5     | Yes    | Power-of-two scale $N$    |
 | 10:0  | Mantissa | 11    | Yes    | Scaled integer value $Y$  |
 
-Interactions
-------------
+### Interactions
 
 | Parameter    | Direction | Type     | Description                                      |
 | ------------ | --------- | -------- | ------------------------------------------------ |
@@ -901,8 +884,7 @@ Interactions
     }
 
 /*
-Validate a UUID string against the RFC 4122 canonical format
-------------------------------------------------------------
+## Validate a UUID string against the RFC 4122 canonical format
 
 Checks that the input string is exactly 36 bytes in length and conforms
 to the canonical UUID pattern `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`,
@@ -913,8 +895,7 @@ Because valid UUIDs consist entirely of ASCII characters, using strlen
 to obtain the byte count is correct and does not conflict with the
 UTF-8 string handling requirement of Rule 1.2.
 
-Interactions
-------------
+### Interactions
 
 | Parameter    | Direction | Type  | Description                                                        |
 | ------------ | --------- | ----- | ------------------------------------------------------------------ |
@@ -956,8 +937,7 @@ Interactions
     }
 
 /*
-Generate a random RFC 4122 version 4 UUID string
--------------------------------------------------
+## Generate a random RFC 4122 version 4 UUID string
 
 Reads 16 bytes of cryptographically random data from /dev/urandom,
 applies the version (4) and variant (1) bit fields required by RFC 4122
@@ -966,8 +946,7 @@ UUID string of the form `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
 
 The caller must supply a buffer of at least 37 bytes.
 
-Interactions
-------------
+### Interactions
 
 | Parameter    | Direction | Type  | Description                                                                |
 | ------------ | --------- | ----- | -------------------------------------------------------------------------- |
@@ -1022,8 +1001,7 @@ Other changes to system state include:
     }
 
 /*
-Format the current UTC time as an ISO 8601 microsecond-precision string
-------------------------------------------------------------------------
+## Format the current UTC time as an ISO 8601 microsecond-precision string
 
 Reads the current real-time clock via clock_gettime(CLOCK_REALTIME),
 converts the result to broken-down UTC time using gmtime_r, and writes a
@@ -1034,8 +1012,7 @@ The buffer must be at least `C_ISO8601_LEN` (28) bytes. The trailing `Z`
 denotes UTC. The sub-second field `ffffff` is derived from the timespec
 nanosecond component: $\lfloor tv\_nsec \div 1000 \rfloor$.
 
-Interactions
-------------
+### Interactions
 
 | Parameter    | Direction | Type   | Description                                                                     |
 | ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
@@ -1084,8 +1061,7 @@ Other changes to system state include:
     }
 
 /*
-Handle SIGINT and pass through all other signals
--------------------------------------------------
+## Handle SIGINT and pass through all other signals
 
 Installed as the SIGINT action by hxi_collect_values. On receipt of
 SIGINT, sets the global g_abort_collect flag to true, which causes the
@@ -1096,8 +1072,7 @@ For any other signal, the handler restores the default system disposition
 via sigaction and immediately re-raises the signal, allowing the process
 to behave as if the custom handler had never been installed.
 
-Interactions
-------------
+### Interactions
 
 | Parameter       | Direction | Type         | Description                                                                             |
 | --------------- | --------- | ------------ | --------------------------------------------------------------------------------------- |

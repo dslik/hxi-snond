@@ -1,6 +1,5 @@
 /*
-Safety-check constants and helper
-----------------------------------
+## Safety-check constants and helper
 
 `C_STACK_DEPTH` controls how many call frames are printed on a REQUIRES,
 ENSURES, or ASSERT failure. The `safety_abort` function is called exclusively
