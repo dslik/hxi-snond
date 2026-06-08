@@ -109,11 +109,13 @@ Local functions
 */
 
     int main(int argc, char* argv[]);
-    void snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name);
-    cJSON* json_load_file(const char* json_file_path);
-    int32_t hxi_collect_values(char* snon_path, int dev_fd, char* uuid_value);
+    int32_t hxi_config_json_validate(cJSON* config_json);
+    int32_t hxi_create_snon_definitions(cJSON* config_json, const char* output_path, char* device_uuid);
+    int32_t hxi_collect_values(cJSON* config_json, const char* output_path, int dev_fd);
     int32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage);
     int32_t hxi_select_rail(int dev_fd, uint8_t rail);
+    void snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name);
+    cJSON* json_load_file(const char* json_file_path);
     double reg_to_value(uint16_t reg);
     bool is_valid_uuid(const char* uuid_value);
     int32_t generate_random_uuid(char* uuid_value);
@@ -176,19 +178,10 @@ Other changes to system state include:
         const char*             config_path = "./sensors.json";
         const char*             uuid_arg = NULL;
         char                    device_uuid[C_UUID_LEN] = {0};
-        char                    sensor_uuid[C_UUID_LEN] = {0};
         int32_t                 dev_fd = 0;
         char                    snon_path[PATH_MAX] = {0};
-        int32_t                 snon_fd = 0;
         struct hidraw_devinfo   hid_info = {0};
         cJSON*                  config_json = NULL;
-        cJSON*                  snon_root = NULL;
-        cJSON*                  relation_object = NULL;
-        cJSON*                  relation_array = NULL;
-        char*                   snon_output = NULL;
-        char                    working_string[1024] = {0};
-        size_t                  output_len = 0U;
-        ssize_t                 bytes_written = 0;
         
         // Obtain command line arguments
         while(C_FAILURE != opt)
@@ -243,21 +236,21 @@ Other changes to system state include:
         // Validate Inputs
         if(C_FAILURE == access(device_name, R_OK | W_OK))
         {
-            fprintf(stderr,"Error accessing specified hid device: %s\n", device_name);
+            fprintf(stderr, "Error accessing specified hid device: %s\n", device_name);
             perror(device_name);
             return(EXIT_FAILURE);
         }
         
         if(C_FAILURE == access(output_path, R_OK | W_OK))
         {
-            fprintf(stderr,"Error accessing specified output directory: %s\n", output_path);
+            fprintf(stderr, "Error accessing specified output directory: %s\n", output_path);
             perror(output_path);
             return(EXIT_FAILURE);
         }
         
         if(C_FAILURE == access(config_path, R_OK))
         {
-            fprintf(stderr,"Error accessing specified config file: %s\n", config_path);
+            fprintf(stderr, "Error accessing specified config file: %s\n", config_path);
             perror(config_path);
             return(EXIT_FAILURE);
         }
@@ -265,7 +258,7 @@ Other changes to system state include:
         // Ensure that the output directory ends with a "/"
         if('/' != output_path[strlen(output_path) - 1])
         {
-            fprintf(stderr,"Specified output directory does not end with a '/': %s\n", output_path);
+            fprintf(stderr, "Specified output directory does not end with a '/': %s\n", output_path);
             return(EXIT_FAILURE);
         }
         
@@ -274,7 +267,7 @@ Other changes to system state include:
         {
             if(false == is_valid_uuid(uuid_arg))
             {
-                fprintf(stderr,"Invalid UUID format: %s\n", uuid_arg);
+                fprintf(stderr, "Invalid UUID format: %s\n", uuid_arg);
                 return(EXIT_FAILURE);
             }
             
@@ -284,7 +277,7 @@ Other changes to system state include:
         {
             if(C_FAILURE == generate_random_uuid(device_uuid))
             {
-                fprintf(stderr,"Error generating random UUID\n");
+                fprintf(stderr, "Error generating random UUID\n");
                 return(EXIT_FAILURE);
             }
         }
@@ -296,7 +289,7 @@ Other changes to system state include:
         memset(&hid_info, 0, sizeof(hid_info));
         if(C_FAILURE == ioctl(dev_fd, HIDIOCGRAWINFO, &hid_info))
         {
-            fprintf(stderr,"Specified path '%s' is not a HID device.\n", device_name);
+            fprintf(stderr, "Specified path '%s' is not a HID device.\n", device_name);
             perror(device_name);
             close(dev_fd);
             return(EXIT_FAILURE);
@@ -320,9 +313,13 @@ Other changes to system state include:
         // Read a configuration JSON file that specifies which sensors
         // should be collected
         config_json = json_load_file(config_path);
-        snon_output = cJSON_PrintUnformatted(config_json);
+        if(C_FAILURE == hxi_config_json_validate(config_json))
+        {
+            fprintf(stderr, "Invalid configuration JSON file contents\n");
+            close(dev_fd);
+            return(EXIT_FAILURE);
+        }
 
-        // FIXME - Process config file
         
         // ===========================================================
         // Create SNON device and sensor records if they do not exist
@@ -330,17 +327,96 @@ Other changes to system state include:
         
         if(C_FAILURE == access(snon_path, R_OK | W_OK))
         {
-            // Create a new SNON device object
-            snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-            
-            if(C_FAILURE == snon_fd)
+            if(C_FAILURE == hxi_create_snon_definitions(config_json, output_path, device_uuid))
             {
-                fprintf(stderr, "Error creating SNON device record file: %s\n", snon_path);
-                perror("open");
+                fprintf(stderr, "Error creating SNON definition record\n");
                 close(dev_fd);
                 return(EXIT_FAILURE);
             }
-            
+        }
+        
+        // ===========================================================
+        // Obtain HXi Power Supply Information
+        if(C_FAILURE == hxi_collect_values(config_json, snon_path, dev_fd))
+        {
+            fprintf(stderr, "Error writing SNON value record\n");
+            close(dev_fd);
+            return(EXIT_FAILURE);
+        }
+        
+        close(dev_fd);
+        return(EXIT_SUCCESS);
+    }
+
+
+    int32_t hxi_config_json_validate(cJSON* config_json)
+    {
+
+
+
+    }
+
+
+/*
+## hxi_create_snon_definitions
+ 
+Creates SNON (Sensor Node Object Notation) definition files for a device and one
+associated 3.3V Rail Power sensor. Three filesystem artefacts are produced:
+ 
+1. A device record JSON file at `output_path + device_uuid + ".json"`, containing
+   the device entity ID (`eID`), class (`eC`), and name (`eN`).
+2. A sensor record JSON file at `output_path + sensor_uuid + ".json"`, containing
+   the sensor entity ID, class, name, and a `child_of` relation linking it to the
+   device. The sensor UUID is generated internally by this function.
+3. A sensor data directory at `output_path + "/" + sensor_uuid`.
+  
+### Interactions
+ 
+| Parameter   | Direction | Type        | Description                                                              |
+| ----------- | --------- | ----------- | ------------------------------------------------------------------------ |
+| config_json | in        | cJSON*      | Configuration object. Indicates which sensor records to create.          |
+| output_path | in        | const char* | Path prefix for all output files. Must not be NULL. Must end with '/'.   |
+| device_uuid | in        | char*       | UUID string identifying the device. Must not be NULL or empty.           |
+ 
+Other changes to system state include:
+
+- Creates file `output_path + device_uuid + ".json"` on the filesystem.
+- Creates file `output_path + sensor_uuid + ".json"` on the filesystem, where
+  `sensor_uuid` is a randomly generated UUID internal to this function.
+- Creates directory `output_path + "/" + sensor_uuid` on the filesystem.
+*/
+ 
+    int32_t hxi_create_snon_definitions(cJSON* config_json, const char* output_path, char* device_uuid)
+    {
+        char        snon_path[PATH_MAX] = {0};
+        int32_t     snon_fd = C_FAILURE;
+        cJSON*      snon_root = NULL;
+        cJSON*      relation_object = NULL;
+        cJSON*      relation_array = NULL;
+        char        sensor_uuid[C_UUID_LEN] = {0};
+        char        working_string[1024] = {0};
+        char*       snon_output = NULL;
+        size_t      output_len = 0U;
+        ssize_t     bytes_written = 0;
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != output_path, "output_path is NULL");
+        REQUIRES(NULL != device_uuid, "device_uuid is NULL");
+        REQUIRES(is_valid_uuid(device_uuid), "device_uuid is not valid");
+
+        // Create a new SNON device object
+        snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, device_uuid);
+        snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+        
+        if(C_FAILURE == snon_fd)
+        {
+            fprintf(stderr, "Error creating SNON device record file: %s\n", snon_path);
+            perror("open");
+            return_status = C_FAILURE;
+        }
+        
+        if(C_SUCCESS == return_status)
+        {
             // Create a new device record
             snon_root = cJSON_CreateObject();
             ASSERT(NULL != snon_root, "cJSON_CreateObject() returned NULL; memory exhausted");
@@ -350,6 +426,7 @@ Other changes to system state include:
             cJSON_AddItemToObjectCS(snon_root, "eC", cJSON_CreateString("device"));
             snon_addname(snon_root, "eN", "*", "HX1000i Power Supply");
             snon_output = cJSON_PrintUnformatted(snon_root);
+            ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
             
             output_len = strlen(snon_output);
             bytes_written = write(snon_fd, snon_output, output_len);
@@ -360,47 +437,56 @@ Other changes to system state include:
             {
                 fprintf(stderr, "Error writing SNON device record\n");
                 perror("write");
-                cJSON_free(snon_output);
-                cJSON_Delete(snon_root);
-                close(snon_fd);
-                close(dev_fd);
-                return(EXIT_FAILURE);
+                return_status = C_FAILURE;
             }
             
             cJSON_free(snon_output);
             cJSON_Delete(snon_root);
             close(snon_fd);
-            
-            // Create a new SNON sensor object
+        }
+        
+        if(C_SUCCESS == return_status)
+        {
+            // Generate a new UUID for the sensor record
             if(C_FAILURE == generate_random_uuid(sensor_uuid))
             {
-                fprintf(stderr,"Error generating random UUID\n");
-                return(EXIT_FAILURE);
+                fprintf(stderr, "Error generating random UUID\n");
+                return_status = C_FAILURE;
             }
-            
+        }
+        
+        if(C_SUCCESS == return_status)
+        {
+            // Open the sensor record file for writing
             snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, sensor_uuid);
             snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-
+ 
             if(C_FAILURE == snon_fd)
             {
                 fprintf(stderr, "Error creating SNON sensor record file: %s\n", snon_path);
                 perror("open");
-                close(dev_fd);
-                return(EXIT_FAILURE);
+                return_status = C_FAILURE;
             }
-            
+        }
+        
+        if(C_SUCCESS == return_status)
+        {
             // Create a new sensor record
             snon_root = cJSON_CreateObject();
+            ASSERT(NULL != snon_root, "cJSON_CreateObject() returned NULL; memory exhausted");
+
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", sensor_uuid);
             cJSON_AddItemToObjectCS(snon_root, "eID", cJSON_CreateString(working_string));
             cJSON_AddItemToObjectCS(snon_root, "eC", cJSON_CreateString("sensor"));
             snon_addname(snon_root, "eN", "*", "3.3V Rail Power");
             
             relation_array = cJSON_CreateArray();
+            ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
             cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
             
             relation_object = cJSON_CreateObject();
+            ASSERT(NULL != relation_object, "cJSON_CreateObject() returned NULL; memory exhausted");
             cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
             cJSON_AddItemToObjectCS(snon_root, "eR", relation_object);
             snon_output = cJSON_PrintUnformatted(snon_root);
@@ -414,42 +500,30 @@ Other changes to system state include:
             {
                 fprintf(stderr, "Error writing SNON device record\n");
                 perror("write");
-                cJSON_free(snon_output);
-                cJSON_Delete(snon_root);
-                close(snon_fd);
-                close(dev_fd);
-                return(EXIT_FAILURE);
+                return_status = C_FAILURE;
             }
-            
-            // Create sensor directory
-            snprintf(snon_path, sizeof(snon_path), "%s/%s", output_path, sensor_uuid);
-            if(C_FAILURE == mkdir(snon_path, S_IRWXU))
-            {
-                fprintf(stderr,"Error creating sensor directory\n");
-                perror("mkdir");
-                return(EXIT_FAILURE);
-            }
-            
+
             cJSON_free(snon_output);
             cJSON_Delete(snon_root);
             close(snon_fd);
         }
         
-        // ===========================================================
-        // Obtain HXi Power Supply Information
-        
-        iso8601_time(working_string, sizeof(working_string));
-        snprintf(snon_path, sizeof(snon_path), "%s/%s/%s-%s.json", output_path, sensor_uuid, sensor_uuid, working_string);
-
-        if(C_FAILURE == hxi_collect_values(snon_path, dev_fd, sensor_uuid))
+        if(C_SUCCESS == return_status)
         {
-            fprintf(stderr,"Error writing SNON value record\n");
-            return(EXIT_FAILURE);
+            // Create the sensor data directory
+            snprintf(snon_path, sizeof(snon_path), "%s/%s", output_path, sensor_uuid);
+ 
+            if(C_FAILURE == mkdir(snon_path, S_IRWXU))
+            {
+                fprintf(stderr, "Error creating sensor directory\n");
+                perror("mkdir");
+                return_status = C_FAILURE;
+            }
         }
-        
-        close(dev_fd);
-        return(EXIT_SUCCESS);
+  
+        return(return_status);
     }
+
 
 /*
 ## Add a localised name entry to a SNON object
@@ -535,14 +609,14 @@ Other changes to system state include:
         
         if(C_FAILURE == json_fd)
         {
-            fprintf(stderr,"Unable to open JSON file '%s'.\n", json_file_path);
+            fprintf(stderr, "Unable to open JSON file '%s'.\n", json_file_path);
             return(NULL);
         }
         
         // Get file size
         if(C_FAILURE == fstat(json_fd, &file_stat))
         {
-            fprintf(stderr,"Unable to get size of JSON file '%s'.\n", json_file_path);
+            fprintf(stderr, "Unable to get size of JSON file '%s'.\n", json_file_path);
             close(json_fd);
             return(NULL);
         }
@@ -555,7 +629,7 @@ Other changes to system state include:
         
         if(NULL == read_buffer)
         {
-            fprintf(stderr,"Unable to allocate %ld bytes of memory to read JSON file.\n", file_length);
+            fprintf(stderr, "Unable to allocate %ld bytes of memory to read JSON file.\n", file_length);
             close(json_fd);
             return(NULL);
         }
@@ -566,7 +640,7 @@ Other changes to system state include:
         
         if(bytes_read != file_length)
         {
-            fprintf(stderr,"Unable to read file, expected %ld bytes, got %ld bytes.\n", file_length, bytes_read);
+            fprintf(stderr, "Unable to read file, expected %ld bytes, got %ld bytes.\n", file_length, bytes_read);
             free(read_buffer);
             return(NULL);
         }
@@ -620,23 +694,28 @@ Other changes to system state include:
 
 */
 
-    int32_t hxi_collect_values(char* snon_path, int dev_fd, char* uuid_value)
+    int32_t hxi_collect_values(cJSON* config_json, const char* output_path, int dev_fd)
     {
+        char                snon_path[PATH_MAX] = {0};
         double              wattage = 0.0;
         int                 snon_fd = -1;
         char*               snon_output = NULL;
-        char                working_string[64] = {0};
+        char                working_string[1024] = {0};
         struct sigaction    signal_action = {0};
         bool                first_record = true;
         cJSON*              senml_array = NULL;
         cJSON*              entry = NULL;
+        char                sensor_uuid[C_UUID_LEN] = {0};
         size_t              data_len = 0U;
         ssize_t             data_written_len = 0;
         struct timespec     poll_interval = {0, C_POLL_INTERVAL_NS};
         
-        REQUIRES(NULL != snon_path, "NULL pointer passed for snon_path");
-        REQUIRES(NULL != uuid_value, "NULL pointer passed for uuid_value");
+        REQUIRES(NULL != config_json, "NULL pointer passed for config_json");
+        REQUIRES(NULL != output_path, "NULL pointer passed for snon_path");
         REQUIRES(dev_fd >= 0, "Invalid file descriptor %d", dev_fd);
+
+        iso8601_time(working_string, sizeof(working_string));
+        snprintf(snon_path, sizeof(snon_path), "%s/%s/%s-%s.json", output_path, sensor_uuid, sensor_uuid, working_string);
 
         if(C_FAILURE == access(snon_path, R_OK | W_OK))
         {
@@ -757,27 +836,27 @@ Other changes to system state include:
         
         if(sizeof(command) != write(dev_fd, command, sizeof(command)))
         {
-            fprintf(stderr,"Error writing command to device\n");
+            fprintf(stderr, "Error writing command to device\n");
             perror("Command Write");
             return(C_FAILURE);
         }
         
         if(sizeof(response) != read(dev_fd, response, sizeof(response)))
         {
-            fprintf(stderr,"Error reading response from device\n");
+            fprintf(stderr, "Error reading response from device\n");
             perror("Command Read");
             return(C_FAILURE);
         }
         
         if(C_HXI_RAIL_CMD_LEN != response[0])
         {
-            fprintf(stderr,"Unexpected response length %i (expected %i)\n", response[0], C_HXI_RAIL_CMD_LEN);
+            fprintf(stderr, "Unexpected response length %i (expected %i)\n", response[0], C_HXI_RAIL_CMD_LEN);
             return(C_FAILURE);
         }
         
         if(C_HXI_RAIL_OK != response[1])
         {
-            fprintf(stderr,"Unexpected response type '0x%02x' (expected 0x%02x)\n", response[1], C_HXI_RAIL_OK);
+            fprintf(stderr, "Unexpected response type '0x%02x' (expected 0x%02x)\n", response[1], C_HXI_RAIL_OK);
             return(C_FAILURE);
         }
         
@@ -824,7 +903,7 @@ Other changes to system state include:
 
         if(C_FAILURE == hxi_select_rail(dev_fd, rail))
         {
-            fprintf(stderr,"Unable to select output rail\n");
+            fprintf(stderr, "Unable to select output rail\n");
             return(C_FAILURE);
         }
         
@@ -832,27 +911,27 @@ Other changes to system state include:
         command[1] = C_HXI_PWR_READ_CMD;    // Read Power
         if(sizeof(command) != write(dev_fd, command, sizeof(command)))
         {
-            fprintf(stderr,"Error writing command to device\n");
+            fprintf(stderr, "Error writing command to device\n");
             perror("Command Write");
             return(C_FAILURE);
         }
         
         if(sizeof(response) != read(dev_fd, response, sizeof(response)))
         {
-            fprintf(stderr,"Error reading response from device\n");
+            fprintf(stderr, "Error reading response from device\n");
             perror("Command Read");
             return(C_FAILURE);
         }
         
         if(C_HXI_PWR_CMD_LEN != response[0])
         {
-            fprintf(stderr,"Unexpected response length %i (expected %i)\n", response[0], C_HXI_PWR_CMD_LEN);
+            fprintf(stderr, "Unexpected response length %i (expected %i)\n", response[0], C_HXI_PWR_CMD_LEN);
             return(C_FAILURE);
         }
         
         if(C_HXI_PWR_READ_CMD != response[1])
         {
-            fprintf(stderr,"Unexpected response type '0x%02x' (expected 0x%02x)\n", response[1], C_HXI_PWR_READ_CMD);
+            fprintf(stderr, "Unexpected response type '0x%02x' (expected 0x%02x)\n", response[1], C_HXI_PWR_READ_CMD);
             return(C_FAILURE);
         }
         
@@ -1008,14 +1087,14 @@ Other changes to system state include:
         
         if(C_FAILURE == urandom_fd)
         {
-            fprintf(stderr,"Unable to open /dev/urandom for UUID generation\n");
+            fprintf(stderr, "Unable to open /dev/urandom for UUID generation\n");
             perror("/dev/urandom");
             return(C_FAILURE);
         }
         
         if((ssize_t) sizeof(uuid_bytes) != read(urandom_fd, uuid_bytes, sizeof(uuid_bytes)))
         {
-            fprintf(stderr,"Unable to read from /dev/urandom for UUID generation\n");
+            fprintf(stderr, "Unable to read from /dev/urandom for UUID generation\n");
             perror("/dev/urandom");
             close(urandom_fd);
             return(C_FAILURE);

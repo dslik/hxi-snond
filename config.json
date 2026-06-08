@@ -1,0 +1,7 @@
+{
+	"3.3 Volt Rail Watts": {
+		"rail": "0",
+		"register": "150",
+		"measurand": "watts"
+	}
+}
