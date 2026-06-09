@@ -1,6 +1,16 @@
 {
-	"3.3 Volt Rail Watts": {
+	"3.3V Output Watts": {
 		"rail": "0",
+		"register": "150",
+		"measurand": "watts"
+	},
+	"5V Output Watts": {
+		"rail": "1",
+		"register": "150",
+		"measurand": "watts"
+	},
+	"12V Output Watts": {
+		"rail": "2",
 		"register": "150",
 		"measurand": "watts"
 	}
