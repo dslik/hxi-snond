@@ -1,0 +1,431 @@
+//<!DOCTYPE html><html><title>HXi HX1000i Configuration Validation</title><xmp theme="united" style="display:none;">
+/*
+## Overview
+
+Validates the JSON configuration file that specifies which sensors should be collected.
+
+Known issues:
+
+- None
+
+*/
+
+    // ---------------------------------------------------------------------------------
+    // HX1000i Power Supply Sensor Daemon - Configuration Validation
+    // ---------------------------------------------------------------------------------
+    // Validates a cJSON object containing one or more named power rail configuration
+    // entries. Each top-level key is a descriptive measurement name; its value must
+    // be a JSON object with three string fields:
+    //   "rail"      - non-negative integer index string, in range [0, C_FIELD_VALUE_MAX]
+    //   "register"  - non-negative integer address string, in range [0, C_FIELD_VALUE_MAX]
+    //   "measurand" - one of the recognized measurement type strings in g_valid_measurands
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/hxi-snond/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+
+    #include <errno.h>      // errno
+    #include <inttypes.h>   // PRId32
+    #include <stdbool.h>    // bool, true, false
+    #include <stdint.h>     // int32_t, int64_t, uint32_t
+    #include <stdlib.h>     // strtoll, NULL
+    #include <string.h>     // strncmp, strlen
+
+    #include "hxi-config.h" // Public interfaces
+    #include "dbc.h"        // REQUIRES, ENSURES, ASSERT macros
+
+/*
+### Project constants
+
+Each validation function returns C_VALIDATE_SUCCESS (zero) on success, or one of
+the negative error codes below on failure. The code identifies the first validation
+rule that was violated.
+*/
+
+    #define C_VALIDATE_SUCCESS            0
+    #define C_VALIDATE_ERR_NOT_OBJECT    -1
+    #define C_VALIDATE_ERR_ENTRY_NOT_OBJ -2
+    #define C_VALIDATE_ERR_MISSING_FIELD -3
+    #define C_VALIDATE_ERR_FIELD_NOT_STR -4
+    #define C_VALIDATE_ERR_BAD_MEASURAND -5
+    #define C_VALIDATE_ERR_BAD_NUMBER    -6
+    #define C_VALIDATE_ERR_NUMBER_RANGE  -7
+
+    #define C_FIELD_VALUE_MAX 65535
+    #define C_STRING_MAX_LEN  64U
+
+/*
+### Project prototypes
+
+Local functions
+*/
+
+    static int32_t hxi_string_field_validate(const cJSON* field);
+    static int32_t hxi_measurand_validate(const cJSON* field);
+    static int32_t hxi_config_entry_validate(const cJSON* entry);
+
+/*
+### Project globals
+
+g_valid_measurands lists every accepted value for the "measurand" field. The list
+is terminated by a NULL sentinel, which the search loop uses as its exit condition.
+*/
+
+    static const char* g_valid_measurands[] =
+    {
+        "watts",
+        "volts",
+        "amps",
+        NULL
+    };
+
+/*
+## Validate a configuration JSON object
+
+Validates a cJSON object that must contain one or more named power rail
+configuration entries. The top-level value must be a JSON object. Each child
+entry is validated by hxi_config_entry_validate; validation stops and returns
+the error code of the first failing entry. An empty configuration object (no
+entries) is considered valid and returns C_VALIDATE_SUCCESS.
+
+### Interactions
+
+| Parameter       | Direction | Type         | Description                                                                                         |
+| --------------- | --------- | ------------ | --------------------------------------------------------------------------------------------------- |
+| config_json | in        | cJSON* | Pointer to the root cJSON object to validate       |
+| return value    | out       | int32_t      | C_VALIDATE_SUCCESS (0) on validation success.
+C_VALIDATE_ERR_* on validation failure.                                    |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    int32_t hxi_config_json_validate(cJSON* config_json)
+    {
+        int32_t         result = C_VALIDATE_SUCCESS;
+        const cJSON*    entry = NULL;
+        bool            iteration_done = false;
+
+        REQUIRES(NULL != config_json, "config_json must not be NULL");
+
+        if(!cJSON_IsObject(config_json))
+        {
+            result = C_VALIDATE_ERR_NOT_OBJECT;
+            iteration_done = true;
+        }
+
+        if(!iteration_done)
+        {
+            entry = config_json->child;
+        }
+
+        while(!iteration_done)
+        {
+            if(NULL == entry)
+            {
+                iteration_done = true;
+            }
+            else
+            {
+                result = hxi_config_entry_validate(entry);
+
+                if(C_VALIDATE_SUCCESS != result)
+                {
+                    iteration_done = true;
+                }
+                else
+                {
+                    entry = entry->next;
+                }
+            }
+        }
+
+        ENSURES(result <= C_VALIDATE_SUCCESS, "result must be zero or negative, got %" PRId32, result);
+
+        return(result);
+    }
+
+/*
+## Validate a string field as a non-negative integer
+
+Checks that a cJSON item is a string whose contents represent a valid non-negative
+integer in the range [0, C_FIELD_VALUE_MAX]. The check covers correct JSON type,
+non-empty content, maximum string length, absence of non-numeric or trailing
+characters, and numeric range.
+
+### Interactions
+
+| Parameter       | Direction | Type         | Description                                                                                         |
+| --------------- | --------- | ------------ | --------------------------------------------------------------------------------------------------- |
+| field           | in        | const cJSON* | The cJSON string item to validate as an integer |
+| return value    | out       | int32_t      | C_VALIDATE_SUCCESS (0) on validation success.
+C_VALIDATE_ERR_* on validation failure.                                    |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    static int32_t hxi_string_field_validate(const cJSON* field)
+    {
+        int32_t         result = C_VALIDATE_SUCCESS;
+        const char*     str = NULL;
+        char*           end_ptr = NULL;
+        int64_t         parsed_value = 0;
+
+        REQUIRES(NULL != field, "field must not be NULL");
+
+        if(!cJSON_IsString(field))
+        {
+            result = C_VALIDATE_ERR_FIELD_NOT_STR;
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            str = cJSON_GetStringValue(field);
+
+            if(NULL == str)
+            {
+                result = C_VALIDATE_ERR_FIELD_NOT_STR;
+            }
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            if(strlen(str) == 0U)
+            {
+                result = C_VALIDATE_ERR_BAD_NUMBER;
+            }
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            // ASDFG-C 2026 5.25: VIOLATION: C_STRING_MAX_LEN is unsigned int; cast to size_t
+            // is required to match strlen()'s return type and avoid a mixed-width unsigned comparison.
+            if(strlen(str) > (size_t) C_STRING_MAX_LEN)
+            {
+                result = C_VALIDATE_ERR_BAD_NUMBER;
+            }
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            errno = 0;
+
+            // MISRA-C 2023 4.6: VIOLATION: strtoll() returns long long, a basic numerical type
+            // rather than a fixed-width typedef; no fixed-width alternative to strtoll exists in C18.
+            // MISRA-C 2023 10.5: VIOLATION: the essential type of long long is cast to int64_t;
+            // the cast is safe because both types are 64-bit signed integers on this target.
+            // ASDFG-C 2026 5.25: VIOLATION: cast from long long to int64_t is required due to
+            // strtoll's non-fixed-width return type; the cast is safe on this target (see above).
+                        parsed_value = (int64_t) strtoll(str, &end_ptr, 10);
+
+            if(errno != 0)
+            {
+                result = C_VALIDATE_ERR_NUMBER_RANGE;
+            }
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            if(end_ptr == str)
+            {
+                result = C_VALIDATE_ERR_BAD_NUMBER;
+            }
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            if('\0' != *end_ptr)
+            {
+                result = C_VALIDATE_ERR_BAD_NUMBER;
+            }
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            if(parsed_value < 0)
+            {
+                result = C_VALIDATE_ERR_NUMBER_RANGE;
+            }
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            if(parsed_value > C_FIELD_VALUE_MAX)
+            {
+                result = C_VALIDATE_ERR_NUMBER_RANGE;
+            }
+        }
+
+        ENSURES(result <= C_VALIDATE_SUCCESS, "result must be zero or negative, got %" PRId32, result);
+
+        return(result);
+    }
+
+/*
+## Validate the measurand string field
+
+Checks that a cJSON item is a string whose value matches one of the recognized
+measurand type strings in g_valid_measurands. An unrecognized measurand value is
+treated as a validation failure. The search uses a NULL-sentinel loop over
+g_valid_measurands so that adding new types requires only a list update.
+
+### Interactions
+
+| Parameter       | Direction | Type         | Description                                                                                         |
+| --------------- | --------- | ------------ | --------------------------------------------------------------------------------------------------- |
+| field           | in        | const cJSON* | The cJSON string item to validate as a measurand |
+| return value    | out       | int32_t      | C_VALIDATE_SUCCESS (0) on validation success.
+C_VALIDATE_ERR_* on validation failure.                                    |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    static int32_t hxi_measurand_validate(const cJSON* field)
+    {
+        int32_t         result = C_VALIDATE_ERR_BAD_MEASURAND;
+        const char*     measurand_str = NULL;
+        uint32_t        index = 0U;
+        bool            iteration_done = false;
+
+        REQUIRES(NULL != field, "field must not be NULL");
+
+        if(!cJSON_IsString(field))
+        {
+            result = C_VALIDATE_ERR_FIELD_NOT_STR;
+            iteration_done = true;
+        }
+
+        if(!iteration_done)
+        {
+            measurand_str = cJSON_GetStringValue(field);
+
+            if(NULL == measurand_str)
+            {
+                result = C_VALIDATE_ERR_FIELD_NOT_STR;
+                iteration_done = true;
+            }
+        }
+
+        if(!iteration_done)
+        {
+            if(strlen(measurand_str) == 0U)
+            {
+                iteration_done = true;
+            }
+        }
+
+        while(!iteration_done)
+        {
+            if(NULL == g_valid_measurands[index])
+            {
+                iteration_done = true;
+            }
+            else if(strncmp(measurand_str, g_valid_measurands[index], (size_t) C_STRING_MAX_LEN) == 0)
+            {
+                result = C_VALIDATE_SUCCESS;
+                iteration_done = true;
+            }
+            else
+            {
+                index = index + 1U;
+            }
+        }
+
+        ENSURES(result <= C_VALIDATE_SUCCESS, "result must be zero or negative, got %" PRId32, result);
+
+        return(result);
+    }
+
+/*
+## Validate a single configuration entry object
+
+Validates one named entry from the configuration JSON. The entry must be a JSON
+object containing the three required string fields: "rail", "register", and
+"measurand". Missing fields, wrong JSON types, and out-of-range or unrecognized
+values are all reported as failures. The specific fields are validated in order;
+the first failure is returned immediately.
+
+### Interactions
+
+| Parameter       | Direction | Type         | Description                                                                                         |
+| --------------- | --------- | ------------ | --------------------------------------------------------------------------------------------------- |
+| entry           | in        | const cJSON* | The cJSON object representing one named entry  |
+| return value    | out       | int32_t      | C_VALIDATE_SUCCESS (0) on validation success.
+C_VALIDATE_ERR_* on validation failure.                                    |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    static int32_t hxi_config_entry_validate(const cJSON* entry)
+    {
+        int32_t         result = C_VALIDATE_SUCCESS;
+        const cJSON*    rail_field = NULL;
+        const cJSON*    register_field = NULL;
+        const cJSON*    measurand_field = NULL;
+
+        REQUIRES(NULL != entry, "entry must not be NULL");
+
+        if(!cJSON_IsObject(entry))
+        {
+            result = C_VALIDATE_ERR_ENTRY_NOT_OBJ;
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            rail_field = cJSON_GetObjectItemCaseSensitive(entry, "rail");
+
+            if(NULL == rail_field)
+            {
+                result = C_VALIDATE_ERR_MISSING_FIELD;
+            }
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            register_field = cJSON_GetObjectItemCaseSensitive(entry, "register");
+
+            if(NULL == register_field)
+            {
+                result = C_VALIDATE_ERR_MISSING_FIELD;
+            }
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            measurand_field = cJSON_GetObjectItemCaseSensitive(entry, "measurand");
+
+            if(NULL == measurand_field)
+            {
+                result = C_VALIDATE_ERR_MISSING_FIELD;
+            }
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            result = hxi_string_field_validate(rail_field);
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            result = hxi_string_field_validate(register_field);
+        }
+
+        if(C_VALIDATE_SUCCESS == result)
+        {
+            result = hxi_measurand_validate(measurand_field);
+        }
+
+        ENSURES(result <= C_VALIDATE_SUCCESS, "result must be zero or negative, got %" PRId32, result);
+
+        return(result);
+    }
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>

@@ -9,8 +9,7 @@ on first run, then enters a continuous polling loop until SIGINT.
 
 Known issues:
 
-- On subsequent runs, the daemon does not reload the sensor UUID from the existing SNON device record.
-- Loading which sensors to read from the config JSON file is not yet implemented.
+- None.
 
 */
 
@@ -40,12 +39,14 @@ Known issues:
     #include <signal.h>         // sigaction, sigemptyset, raise, SIGINT, SA_RESTART, struct sigaction
     #include <sys/ioctl.h>      // ioctl
     #include <sys/stat.h>       // fstat, mkdir, struct stat, S_IRUSR, S_IWUSR, S_IRWXU
-    
+    #include <dirent.h>         // opendir, readdir, closedir, DIR, struct dirent
+
     // Linux includes
     #include <linux/hidraw.h>   // HIDIOCGRAWINFO, struct hidraw_devinfo
     
     // Local includes
     #include "dbc.h"            // Design-by-contract library
+    #include "hxi-config.h"     // Configuration validation
     #include "cJSON.h"          // cJSON library
 
 /*
@@ -347,15 +348,6 @@ Other changes to system state include:
         close(dev_fd);
         return(EXIT_SUCCESS);
     }
-
-
-    int32_t hxi_config_json_validate(cJSON* config_json)
-    {
-
-
-
-    }
-
 
 /*
 ## hxi_create_snon_definitions
