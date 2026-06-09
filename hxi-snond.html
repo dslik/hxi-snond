@@ -119,6 +119,7 @@ section 7.4.3.
 
     // Config JSON field keys
     #define C_CONFIG_SENSORS_KEY    "sensors"   // Top-level array key for the sensor list
+    #define C_CONFIG_RAIL_KEY       "rail"      // Per-sensor key for the rail to read data from
     #define C_CONFIG_NAME_KEY       "name"      // Per-sensor key for the human-readable name
     #define C_CONFIG_UUID_KEY       "uuid"      // Per-sensor key added to hold the SNON UUID
 
@@ -126,6 +127,27 @@ section 7.4.3.
     #define C_JSON_EXT              ".json"     // JSON file extension string
     #define C_JSON_EXT_LEN          5U          // Byte length of C_JSON_EXT (no null)
     #define C_SENSOR_NAME_MAX_LEN   256U        // Maximum buffer length for a sensor name string
+
+/*
+### Sensor collection state
+
+`sensor_state_t` holds all mutable runtime state for one sensor during a
+collection run. `C_MAX_SENSORS` caps the fixed-size array in
+`hxi_collect_values` and must exceed the number of entries in any
+expected config file.
+*/
+
+    #define C_MAX_SENSORS   8U
+
+    typedef struct
+    {
+        int32_t     rail_number;
+        bool        first_record;
+        char        sensor_uuid[C_UUID_LEN];
+        char        snon_path[PATH_MAX];
+        int         snon_fd;
+        cJSON*      senml_array;
+    } sensor_state_t;
 
 /*
 ### Project prototypes
@@ -789,136 +811,448 @@ Other changes to system state include:
     }
 
 /*
-## Collect HXi power values and write a SNON SenML record
+## Load sensor state from the config JSON
 
-Installs a SIGINT signal handler, creates a new SenML value record file
-at snon_path, then enters a polling loop. Each iteration reads the
-current 3.3 V rail power wattage from the HXi device, timestamps the
-reading using iso8601_time, and appends a SenML entry object to an
-in-memory cJSON array. The loop sleeps 100 ms between readings.
-
-The loop continues until g_abort_collect is set true by signal_handler.
-On exit, the completed SenML array is serialised and written to the file.
+Iterates every top-level entry of `config_json` and populates one
+`sensor_state_t` record per entry into `sensors`. The snon_path for each
+sensor embeds `output_path`, the entry UUID, and `timestamp`. Returns
+`C_FAILURE` on the first entry lacking a valid `"rail"` or `"uuid"` field;
+the loop exits immediately and `sensor_count_out` reflects the count of
+valid entries written before the error.
 
 ### Interactions
 
-| Parameter       | Direction | Type         | Description                                                               |
-| --------------- | --------- | ------------ | ------------------------------------------------------------------------- |
-| snon_path       | in        | char*        | Filesystem path at which the output SNON value record file is created     |
-| dev_fd          | in        | int          | Open file descriptor for the HID raw device                               |
-| uuid_value      | in        | char*        | 36-character null-terminated RFC 4122 UUID for the SenML base name field  |
-| return value    | out       | int          | 0 on success; -1 on any I/O or device error                               |
-| g_abort_collect | shared    | sig_atomic_t | Global flag; polled each loop iteration; written true by signal_handler   |
+| Parameter        | Direction | Type            | Description                                                              |
+| ---------------- | --------- | --------------- | ------------------------------------------------------------------------ |
+| config_json      | in        | cJSON*          | UUID-populated config object                                             |
+| output_path      | in        | const char*     | Base directory under which sensor record files will be created           |
+| timestamp        | in        | const char*     | ISO 8601 string embedded in each sensor output file name                 |
+| sensors          | out       | sensor_state_t* | Caller-allocated array of at least C_MAX_SENSORS records to populate     |
+| sensor_count_out | out       | uint32_t*       | Set to the number of valid entries written into sensors                  |
+| return value     | out       | int32_t         | 0 on success; -1 if any entry is missing a valid "rail" or "uuid" field  |
+
+Other changes to system state include: None.
+*/
+    int32_t hxi_config_load_sensors(cJSON* config_json, const char* output_path, const char* timestamp, sensor_state_t* sensors, uint32_t* sensor_count_out)
+    {
+        cJSON*      config_entry = NULL;
+        cJSON*      rail_item = NULL;
+        cJSON*      uuid_item = NULL;
+        uint32_t    count = 0U;
+        long        rail_parsed = 0;
+        char*       rail_end = NULL;
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != config_json, "NULL pointer passed for config_json");
+        REQUIRES(NULL != output_path, "NULL pointer passed for output_path");
+        REQUIRES(NULL != timestamp, "NULL pointer passed for timestamp");
+        REQUIRES(NULL != sensors, "NULL pointer passed for sensors");
+        REQUIRES(NULL != sensor_count_out, "NULL pointer passed for sensor_count_out");
+
+        config_entry = config_json->child;
+
+        while(NULL != config_entry)
+        {
+            ASSERT(count < C_MAX_SENSORS, "Sensor count exceeds C_MAX_SENSORS (%u)", C_MAX_SENSORS);
+
+            rail_item = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_RAIL_KEY);
+            uuid_item = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_UUID_KEY);
+
+            if(NULL == rail_item || false == cJSON_IsString(rail_item))
+            {
+                fprintf(stderr, "Config entry missing valid \"%s\" field\n", C_CONFIG_RAIL_KEY);
+                return_status = C_FAILURE;
+                config_entry = NULL;
+            }
+            else if(NULL == uuid_item || false == cJSON_IsString(uuid_item))
+            {
+                fprintf(stderr, "Config entry missing valid \"%s\" field\n", C_CONFIG_UUID_KEY);
+                return_status = C_FAILURE;
+                config_entry = NULL;
+            }
+            else
+            {
+                rail_end = NULL;
+                // ASDFG-C 2026 5.25: VIOLATION: strtol returns long; cast to int32_t for rail_number.
+                // Safe as rail identifiers are small positive integers within int32_t range.
+                rail_parsed = strtol(rail_item->valuestring, &rail_end, 10);
+                sensors[count].rail_number = (int32_t) rail_parsed;
+                sensors[count].first_record = true;
+                sensors[count].snon_fd = -1;
+                sensors[count].senml_array = NULL;
+                strncpy(sensors[count].sensor_uuid, uuid_item->valuestring, C_UUID_LEN - 1U);
+                snprintf(sensors[count].snon_path, sizeof(sensors[count].snon_path),
+                         "%s/%s/%s-%s.json",
+                         output_path, sensors[count].sensor_uuid,
+                         sensors[count].sensor_uuid, timestamp);
+                count = count + 1U;
+                config_entry = config_entry->next;
+            }
+        }
+
+        *sensor_count_out = count;
+
+        return(return_status);
+    }
+
+
+/*
+## Build a SenML entry object for one sensor reading
+
+Creates a new cJSON object containing the power reading under `"v"` and
+the timestamp under `"t"`. On the first call for a given sensor
+(`sensor->first_record == true`), the SenML base name field `"bn"` is
+prepended as `urn:uuid:<sensor_uuid>` and `first_record` is cleared.
+Returns NULL if object allocation fails.
+
+### Interactions
+
+| Parameter    | Direction | Type            | Description                                                      |
+| ------------ | --------- | --------------- | ---------------------------------------------------------------- |
+| sensor       | shared    | sensor_state_t* | Sensor state; first_record is set to false after the first call  |
+| wattage      | in        | double          | Power reading in watts stored under the "v" field                |
+| timestamp    | in        | const char*     | ISO 8601 string stored under the "t" field                       |
+| return value | out       | cJSON*          | Newly allocated cJSON object; NULL on allocation failure         |
+
+Other changes to system state include:
+- Allocates heap memory for the returned cJSON object and its children.
+  Memory is owned by the caller's senml_array and freed via cJSON_Delete.
+*/
+    cJSON* hxi_build_senml_entry(sensor_state_t* sensor, double wattage, const char* timestamp)
+    {
+        cJSON*  entry = NULL;
+        char    urn_base_name[64] = {0};
+
+        REQUIRES(NULL != sensor, "NULL pointer passed for sensor");
+        REQUIRES(NULL != timestamp, "NULL pointer passed for timestamp");
+
+        entry = cJSON_CreateObject();
+
+        if(NULL != entry)
+        {
+            if(true == sensor->first_record)
+            {
+                snprintf(urn_base_name, sizeof(urn_base_name), "urn:uuid:%s", sensor->sensor_uuid);
+                cJSON_AddItemToObjectCS(entry, "bn", cJSON_CreateString(urn_base_name));
+                sensor->first_record = false;
+            }
+
+            cJSON_AddItemToObjectCS(entry, "v", cJSON_CreateNumber(wattage));
+            cJSON_AddItemToObjectCS(entry, "t", cJSON_CreateString(timestamp));
+        }
+
+        return(entry);
+    }
+
+
+/*
+## Open output files for all sensors
+
+For each sensor whose snon_path does not already exist on disk, creates
+the file, stores the file descriptor in `sensor->snon_fd`, and allocates
+a cJSON array in `sensor->senml_array`. Sensors whose output file already
+exists are silently skipped; their snon_fd remains -1 and they are
+excluded from collection by later stages. Returns C_FAILURE if any
+open call fails.
+
+### Interactions
+
+| Parameter    | Direction | Type            | Description                                                        |
+| ------------ | --------- | --------------- | ------------------------------------------------------------------ |
+| sensors      | shared    | sensor_state_t* | Sensor state array; snon_fd and senml_array are written per sensor |
+| sensor_count | in        | uint32_t        | Number of valid entries in sensors                                 |
+| return value | out       | int32_t         | 0 on success; -1 if any file open fails                            |
+
+Other changes to system state include:
+- Creates regular files on disk at each sensor's snon_path.
+- Allocates heap memory via cJSON for each sensor's SenML array.
+*/
+    int32_t hxi_sensors_open_files(sensor_state_t* sensors, uint32_t sensor_count)
+    {
+        uint32_t    sensor_index = 0U;
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != sensors, "NULL pointer passed for sensors");
+
+        while(sensor_index < sensor_count)
+        {
+            if(C_SUCCESS == return_status)
+            {
+                if(C_FAILURE == access(sensors[sensor_index].snon_path, R_OK | W_OK))
+                {
+                    sensors[sensor_index].snon_fd = open(
+                        sensors[sensor_index].snon_path,
+                        O_RDWR | O_CREAT | O_TRUNC,
+                        S_IRUSR | S_IWUSR);
+
+                    if(C_FAILURE == sensors[sensor_index].snon_fd)
+                    {
+                        fprintf(stderr, "Error creating sensor record file: %s\n",
+                                sensors[sensor_index].snon_path);
+                        perror("open");
+                        return_status = C_FAILURE;
+                    }
+                    else
+                    {
+                        sensors[sensor_index].senml_array = cJSON_CreateArray();
+                        ASSERT(NULL != sensors[sensor_index].senml_array,
+                               "Memory allocation failed for SenML array, sensor %u", sensor_index);
+                    }
+                }
+
+                sensor_index = sensor_index + 1U;
+            }
+            else
+            {
+                sensor_index = sensor_count;
+            }
+        }
+
+        return(return_status);
+    }
+
+
+/*
+## Poll all sensors once and append readings to their SenML arrays
+
+Captures one ISO 8601 timestamp, then iterates every sensor that has an
+open file descriptor (snon_fd != -1). For each, reads the rail power via
+hxi_read_power and appends a new entry object to the sensor's SenML array.
+Sensors whose snon_fd is -1 are skipped. Returns C_FAILURE on the first
+read error.
+
+### Interactions
+
+| Parameter    | Direction | Type            | Description                                                     |
+| ------------ | --------- | --------------- | --------------------------------------------------------------- |
+| dev_fd       | in        | int             | Open file descriptor for the HID raw device                     |
+| sensors      | shared    | sensor_state_t* | Sensor state array; senml_array and first_record may be written |
+| sensor_count | in        | uint32_t        | Number of valid entries in sensors                              |
+| return value | out       | int32_t         | 0 on success; -1 if any hxi_read_power call fails               |
+
+Other changes to system state include:
+- Allocates heap memory via cJSON for each SenML entry object appended.
+*/
+    int32_t hxi_sensors_poll_once(int dev_fd, sensor_state_t* sensors, uint32_t sensor_count)
+    {
+        uint32_t    sensor_index = 0U;
+        double      wattage = 0.0;
+        cJSON*      entry = NULL;
+        char        working_string[128] = {0};
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(dev_fd >= 0, "Invalid file descriptor %d", dev_fd);
+        REQUIRES(NULL != sensors, "NULL pointer passed for sensors");
+
+        iso8601_time(working_string, sizeof(working_string));
+
+        while(sensor_index < sensor_count)
+        {
+            if(C_SUCCESS == return_status)
+            {
+                if(-1 != sensors[sensor_index].snon_fd)
+                {
+                    if(C_FAILURE == hxi_read_power(dev_fd, sensors[sensor_index].rail_number, &wattage))
+                    {
+                        fprintf(stderr, "Error reading wattage for rail %d\n",
+                                sensors[sensor_index].rail_number);
+                        return_status = C_FAILURE;
+                    }
+                    else
+                    {
+                        entry = hxi_build_senml_entry(&sensors[sensor_index], wattage, working_string);
+                        ASSERT(NULL != entry, "Memory allocation failed for SenML entry, sensor %u", sensor_index);
+                        cJSON_AddItemToArray(sensors[sensor_index].senml_array, entry);
+                    }
+                }
+
+                sensor_index = sensor_index + 1U;
+            }
+            else
+            {
+                sensor_index = sensor_count;
+            }
+        }
+
+        return(return_status);
+    }
+
+
+/*
+## Serialise and write all SenML arrays, then close all files
+
+Iterates every sensor with an open file descriptor, serialises its SenML
+array with cJSON_PrintUnformatted, and writes the result to the sensor
+file. All file descriptors and cJSON objects are released regardless of
+write errors. Returns C_FAILURE if any write produces an unexpected byte
+count; errors from individual sensors are accumulated rather than causing
+early exit so that all resources are freed.
+
+### Interactions
+
+| Parameter    | Direction | Type            | Description                                                           |
+| ------------ | --------- | --------------- | --------------------------------------------------------------------- |
+| sensors      | shared    | sensor_state_t* | Sensor state array; snon_fd and senml_array are cleared after use     |
+| sensor_count | in        | uint32_t        | Number of valid entries in sensors                                    |
+| return value | out       | int32_t         | 0 on success; -1 if any sensor write produces an unexpected byte count|
+
+Other changes to system state include:
+- Frees all cJSON SenML array memory via cJSON_Delete.
+- Closes all open file descriptors via close.
+*/
+    int32_t hxi_sensors_write_and_close(sensor_state_t* sensors, uint32_t sensor_count)
+    {
+        uint32_t    sensor_index = 0U;
+        char*       snon_output = NULL;
+        size_t      data_len = 0U;
+        ssize_t     data_written_len = 0;
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != sensors, "NULL pointer passed for sensors");
+
+        while(sensor_index < sensor_count)
+        {
+            if(-1 != sensors[sensor_index].snon_fd)
+            {
+                snon_output = cJSON_PrintUnformatted(sensors[sensor_index].senml_array);
+                ASSERT(NULL != snon_output,
+                       "Memory allocation failed serialising SenML array for sensor %u", sensor_index);
+
+                data_len = strlen(snon_output);
+                data_written_len = write(sensors[sensor_index].snon_fd, snon_output, data_len);
+
+                // ASDFG-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with data_len
+                // (size_t); safe because data_written_len is checked for < 0 first.
+                if((data_written_len < 0) || ((size_t) data_written_len != data_len))
+                {
+                    fprintf(stderr, "Error writing SNON value record for sensor %u\n", sensor_index);
+                    perror("write");
+                    return_status = C_FAILURE;
+                }
+
+                cJSON_free(snon_output);
+                cJSON_Delete(sensors[sensor_index].senml_array);
+                close(sensors[sensor_index].snon_fd);
+                sensors[sensor_index].senml_array = NULL;
+                sensors[sensor_index].snon_fd = -1;
+            }
+
+            sensor_index = sensor_index + 1U;
+        }
+
+        return(return_status);
+    }
+
+
+/*
+## Collect HXi power values and write SNON SenML records for all sensors
+
+Loads per-sensor state from config_json, installs a SIGINT handler, then
+opens one output file per sensor. Enters a polling loop that reads all
+configured rails every 100 ms until g_abort_collect is set by the signal
+handler or a read error occurs. On exit, serialises and writes all
+accumulated SenML arrays. hxi_sensors_write_and_close is called
+unconditionally so that files opened before any error are always flushed
+and closed.
+
+### Interactions
+
+| Parameter       | Direction | Type         | Description                                                              |
+| --------------- | --------- | ------------ | ------------------------------------------------------------------------ |
+| config_json     | in        | cJSON*       | UUID-populated config object; all entries are collected                  |
+| output_path     | in        | const char*  | Base directory under which sensor record files are created               |
+| dev_fd          | in        | int          | Open file descriptor for the HID raw device                              |
+| return value    | out       | int32_t      | 0 on success; -1 on any config, I/O, or device error                    |
+| g_abort_collect | shared    | sig_atomic_t | Global flag; polled each loop iteration; written true by signal_handler  |
 
 Other changes to system state include:
 
 - Installs signal_handler as the SIGINT action via sigaction with SA_RESTART.
-- Creates and writes a new regular file at snon_path.
-- Calls usleep(100000) between iterations, suspending the process for ~100 ms.
+- Creates and writes new regular files under output_path for each sensor.
+- Calls nanosleep between iterations, suspending the process for ~100 ms.
 - Writes diagnostic messages to stderr on failure.
 
 */
-
     int32_t hxi_collect_values(cJSON* config_json, const char* output_path, int dev_fd)
     {
-        char                snon_path[PATH_MAX] = {0};
-        double              wattage = 0.0;
-        int                 snon_fd = -1;
-        char*               snon_output = NULL;
-        char                working_string[1024] = {0};
+        sensor_state_t      sensors[C_MAX_SENSORS] = {0};
+        uint32_t            sensor_count = 0U;
+        uint32_t            active_count = 0U;
+        uint32_t            sensor_index = 0U;
+        char                working_string[128] = {0};
         struct sigaction    signal_action = {0};
-        bool                first_record = true;
-        cJSON*              senml_array = NULL;
-        cJSON*              entry = NULL;
-        char                sensor_uuid[C_UUID_LEN] = {0};
-        size_t              data_len = 0U;
-        ssize_t             data_written_len = 0;
         struct timespec     poll_interval = {0, C_POLL_INTERVAL_NS};
-        
+        bool                should_poll = false;
+        int32_t             return_status = C_SUCCESS;
+
         REQUIRES(NULL != config_json, "NULL pointer passed for config_json");
-        REQUIRES(NULL != output_path, "NULL pointer passed for snon_path");
+        REQUIRES(NULL != output_path, "NULL pointer passed for output_path");
         REQUIRES(dev_fd >= 0, "Invalid file descriptor %d", dev_fd);
 
         iso8601_time(working_string, sizeof(working_string));
-        snprintf(snon_path, sizeof(snon_path), "%s/%s/%s-%s.json", output_path, sensor_uuid, sensor_uuid, working_string);
 
-        if(C_FAILURE == access(snon_path, R_OK | W_OK))
+        return_status = hxi_config_load_sensors(config_json, output_path, working_string,
+                                                sensors, &sensor_count);
+
+        if(C_SUCCESS == return_status)
         {
-            // Set up a signal handler to end data collection
             signal_action.sa_handler = signal_handler;
             signal_action.sa_flags = SA_RESTART;
-            
             sigemptyset(&signal_action.sa_mask);
+
             if(C_FAILURE == sigaction(SIGINT, &signal_action, NULL))
             {
                 fprintf(stderr, "Error setting up signal handler\n");
                 perror("sigaction");
-                return(C_FAILURE);
+                return_status = C_FAILURE;
             }
-    
-            // Create the sensor record file
-            snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-            if(C_FAILURE == snon_fd)
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            return_status = hxi_sensors_open_files(sensors, sensor_count);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            while(sensor_index < sensor_count)
             {
-                fprintf(stderr, "Error creating sensor record file\n");
-                perror("open");
-                return(C_FAILURE);
+                if(-1 != sensors[sensor_index].snon_fd)
+                {
+                    active_count = active_count + 1U;
+                }
+
+                sensor_index = sensor_index + 1U;
             }
-            
-            senml_array = cJSON_CreateArray();
-            
-            while(g_abort_collect == false)
+
+            should_poll = (0U < active_count);
+        }
+
+        while(true == should_poll)
+        {
+            if(true == g_abort_collect)
             {
-                iso8601_time(working_string, sizeof(working_string));
-                
-                if(C_FAILURE == hxi_read_power(dev_fd, C_HXI_RAIL_3V3, &wattage))
-                {
-                    fprintf(stderr, "Error reading wattage value\n");
-                    cJSON_Delete(senml_array);
-                    close(snon_fd);
-                    return(C_FAILURE);
-                }
-                
-                entry = cJSON_CreateObject();
-                
-                if(first_record)
-                {
-                    snprintf(working_string, sizeof(working_string), "urn:uuid:%s", uuid_value);
-                    cJSON_AddItemToObjectCS(entry, "bn", cJSON_CreateString(working_string));
-                    first_record = false;
-                }
-                
-                cJSON_AddItemToObjectCS(entry, "v", cJSON_CreateNumber(wattage));
-                cJSON_AddItemToObjectCS(entry, "t", cJSON_CreateString(working_string));
-                cJSON_AddItemToArray(senml_array, entry);
-                
+                should_poll = false;
+            }
+            else if(C_FAILURE == hxi_sensors_poll_once(dev_fd, sensors, sensor_count))
+            {
+                fprintf(stderr, "Error polling sensors; stopping collection\n");
+                return_status = C_FAILURE;
+                should_poll = false;
+            }
+            else
+            {
                 nanosleep(&poll_interval, NULL);
             }
-            
-            // When abort signal received
-            snon_output = cJSON_PrintUnformatted(senml_array);
-            
-            data_len = strlen(snon_output);
-            data_written_len = write(snon_fd, snon_output, data_len);
-
-            // ASDFG-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with data_len
-            // (size_t); safe because data_written_len is checked for < 0 first.
-            if((data_written_len < 0) || ((size_t) data_written_len != data_len))
-            {
-                fprintf(stderr, "Error writing SNON value record\n");
-                perror("SNON write");
-                cJSON_free(snon_output);
-                cJSON_Delete(senml_array);
-                close(snon_fd);
-                return(C_FAILURE);
-            }
-            
-            cJSON_free(snon_output);
-            cJSON_Delete(senml_array);
-            close(snon_fd);
         }
-        
-        return(C_SUCCESS);
+
+        // Always attempt write and close to flush data collected before any error
+        if(C_FAILURE == hxi_sensors_write_and_close(sensors, sensor_count))
+        {
+            return_status = C_FAILURE;
+        }
+
+        return(return_status);
     }
 
 /*
@@ -1097,7 +1431,7 @@ Other changes to system state include:
         REQUIRES(NULL != filename, "NULL pointer passed for filename");
 
         string_len = strlen(filename);
-        if(C_JSON_EXT_LEN > string_len)
+        if(C_JSON_EXT_LEN < string_len)
         {
             if(NULL == strchr(filename, '/'))
             {

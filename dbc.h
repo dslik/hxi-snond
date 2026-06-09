@@ -6,6 +6,8 @@ ENSURES, or ASSERT failure. The `safety_abort` function is called exclusively
 from those three macros; it must never be called directly.
 */
 
+    #include <stdio.h>
+
     #define C_STACK_DEPTH   16U  // Maximum number of stack frames to print on abort
 
     // Forward declaration required so the macros below can reference it.
@@ -21,6 +23,10 @@ from those three macros; it must never be called directly.
         if(false == (condition)) \
         { \
             safety_abort("REQUIRES", __func__, __LINE__, #condition, __VA_ARGS__); \
+        } \
+        else \
+        { \
+            fprintf(stdout, "TRACE REQUIRES: %s, %d, %s\n", __func__, __LINE__, #condition); \
         }
 
     // ENSURES: asserts a postcondition; aborts with a message if the condition is false.
@@ -29,6 +35,10 @@ from those three macros; it must never be called directly.
         if(false == (condition)) \
         { \
             safety_abort("ENSURES", __func__, __LINE__, #condition, __VA_ARGS__); \
+        } \
+        else \
+        { \
+            fprintf(stdout, "TRACE ENSURES : %s, %d, %s\n", __func__, __LINE__, #condition); \
         }
 
     // ASSERT: asserts a mid-function invariant; aborts with a message if the condition is false.
@@ -36,4 +46,8 @@ from those three macros; it must never be called directly.
         if(false == (condition)) \
         { \
             safety_abort("ASSERT", __func__, __LINE__, #condition, __VA_ARGS__); \
+        } \
+        else \
+        { \
+            fprintf(stdout, "TRACE ASSERT  : %s, %d, %s\n", __func__, __LINE__, #condition); \
         }

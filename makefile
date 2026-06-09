@@ -3,7 +3,7 @@ LDFLAGS += -rdynamic
 LDLIBS  += -lm
 
 TARGET = hxi-snond
-OBJS   = hxi-snond.o cJSON.o dbc.o
+OBJS   = hxi-snond.o hxi-config.o dbc.o cJSON.o 
 
 all: $(TARGET)
 
