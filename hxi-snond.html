@@ -2,14 +2,18 @@
 /*
 ## Overview
 
-Polls and writes sensor data from Corsair HXi series power supplies.
-Sensor data is written in SNON 4 SenML format. The daemon opens the
-specified HID raw device, creates initial SNON device and sensor records
-on first run, then enters a continuous polling loop until SIGINT.
+Polls and writes sensor data from Corsair HXi 1000i power supplies.
+
+Sensor data is written in <a href="https://www.snon.org/">SNON 4</a>
+<a href="https://datatracker.ietf.org/doc/html/rfc8428">SenML</a> format.
+The daemon opens the specified HID raw device, creates initial SNON
+device and sensor records on first run, then enters a continuous polling
+loop until SIGINT.
 
 Known issues:
 
-- None.
+- Add structured logging
+- Move helper functions into seperate source files
 
 */
 
@@ -61,71 +65,71 @@ section 7.4.3.
 */
 
     // General
-    #define C_SUCCESS           0           // Function return indicating success
-    #define C_FAILURE           (-1)        // Function return indicating failure
+    #define C_SUCCESS                   0           // Function return indicating success
+    #define C_FAILURE                   (-1)        // Function return indicating failure
     
     // ISO 8601 timestamp
-    #define C_ISO8601_LEN       28U         // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
+    #define C_ISO8601_LEN               28U         // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
     
     // RFC 4122 UUID
-    #define C_UUID_STRLEN       36U         // Character count of a UUID string (no null)
-    #define C_UUID_LEN          37U         // Buffer size including null terminator
-    #define C_UUID_HYPHEN_1     8U          // Byte offset of first  hyphen in a UUID string
-    #define C_UUID_HYPHEN_2     13U         // Byte offset of second hyphen
-    #define C_UUID_HYPHEN_3     18U         // Byte offset of third  hyphen
-    #define C_UUID_HYPHEN_4     23U         // Byte offset of fourth hyphen
+    #define C_UUID_STRLEN               36U         // Character count of a UUID string (no null)
+    #define C_UUID_LEN                  37U         // Buffer size including null terminator
+    #define C_UUID_HYPHEN_1             8U          // Byte offset of first  hyphen in a UUID string
+    #define C_UUID_HYPHEN_2             13U         // Byte offset of second hyphen
+    #define C_UUID_HYPHEN_3             18U         // Byte offset of third  hyphen
+    #define C_UUID_HYPHEN_4             23U         // Byte offset of fourth hyphen
     
     // HXi HID device identifiers
-    #define C_HXI_VENDOR_ID     0x1b1cU     // Corsair USB vendor identifier
-    #define C_HXI_PRODUCT_ID    0x1c1eU     // HX1000i USB product identifier
+    #define C_HXI_VENDOR_ID             0x1b1cU     // Corsair USB vendor identifier
+    #define C_HXI_PRODUCT_ID            0x1c1eU     // HX1000i USB product identifier
     
     // HXi HID packet layout
-    #define C_HXI_PACKET_LEN    64U         // All HID packets are 64 bytes
-    #define C_HXI_RAIL_CMD_LEN  0x02U       // Length byte in a rail-select packet
-    #define C_HXI_RAIL_SEL_CMD  0x00U       // Command byte: select output rail
-    #define C_HXI_RAIL_OK       0x00U       // Response status byte: success
-    #define C_HXI_PWR_CMD_LEN   0x03U       // Length byte in a power-read packet
-    #define C_HXI_PWR_READ_CMD  0x96U       // Command byte: read wattage
+    #define C_HXI_PACKET_LEN            64U         // All HID packets are 64 bytes
+    #define C_HXI_RAIL_CMD_LEN          0x02U       // Length byte in a rail-select packet
+    #define C_HXI_RAIL_SEL_CMD          0x00U       // Command byte: select output rail
+    #define C_HXI_RAIL_OK               0x00U       // Response status byte: success
+    #define C_HXI_PWR_CMD_LEN           0x03U       // Length byte in a power-read packet
     
     // HXi output rail indices
-    #define C_HXI_RAIL_3V3      0U          // 3.3 V output rail index
-    #define C_HXI_RAIL_5V       1U          // 5 V output rail index
-    #define C_HXI_RAIL_12V      2U          // 12 V output rail index
+    #define C_HXI_RAIL_3V3              0U          // 3.3 V output rail index
+    #define C_HXI_RAIL_5V               1U          // 5 V output rail index
+    #define C_HXI_RAIL_12V              2U          // 12 V output rail index
     
     // PMBus LINEAR11 register field constants
-    #define C_L11_EXP_SHIFT     11U         // Bit position of the 5-bit exponent field
-    #define C_L11_MANT_MASK     0x07FFU     // Mask for the 11-bit mantissa field [10:0]
-    #define C_L11_EXP_SIGN_BIT  0x10U       // Sign bit within the 5-bit exponent (bit 4)
-    #define C_L11_EXP_SEXT_MASK 0xFFE0U     // Sign-extension mask for a 5-bit exponent
-    #define C_L11_MANT_SIGN_BIT 0x0400U     // Sign bit within the 11-bit mantissa (bit 10)
-    #define C_L11_MANT_SEXT_MSK 0xFFFFF800U // Sign-extension mask for 11-bit mantissa
+    #define C_L11_EXP_SHIFT             11U         // Bit position of the 5-bit exponent field
+    #define C_L11_MANT_MASK             0x07FFU     // Mask for the 11-bit mantissa field [10:0]
+    #define C_L11_EXP_SIGN_BIT          0x10U       // Sign bit within the 5-bit exponent (bit 4)
+    #define C_L11_EXP_SEXT_MASK         0xFFE0U     // Sign-extension mask for a 5-bit exponent
+    #define C_L11_MANT_SIGN_BIT         0x0400U     // Sign bit within the 11-bit mantissa (bit 10)
+    #define C_L11_MANT_SEXT_MSK         0xFFFFF800U // Sign-extension mask for 11-bit mantissa
     
     // Polling interval for hxi_collect_values
-    #define C_POLL_INTERVAL_NS  100000000L  // 100 ms in nanoseconds (type int, assigned to long tv_nsec)
-    #define C_NS_PER_SECOND     1000000000  // 1 s in nanoseconds
+    #define C_POLL_INTERVAL_NS          100000000L  // 100 ms in nanoseconds (type int, assigned to long tv_nsec)
+    #define C_NS_PER_SECOND             1000000000  // 1 s in nanoseconds
 
     // SNON JSON field keys
-    #define C_SNON_EID_KEY          "eID"       // SNON entity identifier field key
-    #define C_SNON_EC_KEY           "eC"        // SNON entity class field key
-    #define C_SNON_EN_KEY           "eN"        // SNON entity name field key
-    #define C_SNON_ER_KEY           "eR"        // SNON entity relation field key
-    #define C_SNON_LANG_DEFAULT     "*"         // SNON wildcard language tag for default name
-    #define C_SNON_SENSOR_CLASS     "sensor"    // SNON entity class value for sensor records
-    #define C_SNON_CHILD_OF_KEY     "child_of"  // SNON relation key linking a sensor to its device
+    #define C_SNON_EID_KEY              "eID"       // SNON entity identifier field key
+    #define C_SNON_EC_KEY               "eC"        // SNON entity class field key
+    #define C_SNON_EN_KEY               "eN"        // SNON entity name field key
+    #define C_SNON_ER_KEY               "eR"        // SNON entity relation field key
+    #define C_SNON_LANG_DEFAULT         "*"         // SNON wildcard language tag for default name
+    #define C_SNON_SENSOR_CLASS         "sensor"    // SNON entity class value for sensor records
+    #define C_SNON_CHILD_OF_KEY         "child_of"  // SNON relation key linking a sensor to its device
 
     // SNON URN constants
-    #define C_URN_UUID_PREFIX       "urn:uuid:" // URN prefix prepended to each entity UUID
-    #define C_URN_UUID_PREFIX_LEN   9U          // Byte length of C_URN_UUID_PREFIX (no null)
-    #define C_SNON_EID_LEN          46U         // Buffer size for "urn:uuid:<UUID>\0" (9 + 36 + 1)
+    #define C_URN_UUID_PREFIX           "urn:uuid:" // URN prefix prepended to each entity UUID
+    #define C_URN_UUID_PREFIX_LEN       9U          // Byte length of C_URN_UUID_PREFIX (no null)
+    #define C_SNON_EID_LEN              46U         // Buffer size for "urn:uuid:<UUID>\0" (9 + 36 + 1)
 
     // Config JSON field keys
-    #define C_CONFIG_RAIL_KEY       "rail"      // Per-sensor key for the rail to read data from
-    #define C_CONFIG_UUID_KEY       "uuid"      // Per-sensor key added to hold the SNON UUID
+    #define C_CONFIG_REGISTER_KEY       "register"  // Per-sensor key for the register to read data from
+    #define C_CONFIG_RAIL_KEY           "rail"      // Per-sensor key for the rail to read data from
+    #define C_CONFIG_UUID_KEY           "uuid"      // Per-sensor key added to hold the SNON UUID
 
     // Miscellaneous
-    #define C_JSON_EXT              ".json"     // JSON file extension string
-    #define C_JSON_EXT_LEN          5U          // Byte length of C_JSON_EXT (no null)
-    #define C_SENSOR_NAME_MAX_LEN   256U        // Maximum buffer length for a sensor name string
+    #define C_JSON_EXT                  ".json"     // JSON file extension string
+    #define C_JSON_EXT_LEN              5U          // Byte length of C_JSON_EXT (no null)
+    #define C_SENSOR_NAME_MAX_LEN       256U        // Maximum buffer length for a sensor name string
 
 /*
 ### Sensor collection state
@@ -140,7 +144,8 @@ expected config file.
 
     typedef struct
     {
-        int32_t     rail_number;
+        uint8_t     rail_id;
+        uint8_t     register_id;
         bool        first_record;
         char        sensor_uuid[C_UUID_LEN];
         char        snon_path[PATH_MAX];
@@ -159,7 +164,7 @@ Local functions
     int32_t hxi_create_snon_definitions(cJSON* config_json, const char* output_path, char* device_uuid);
     int32_t hxi_create_sensor_record(const char* output_path, const char* device_uuid, const char* sensor_name);
     int32_t hxi_collect_values(cJSON* config_json, const char* output_path, int dev_fd);
-    int32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage);
+    int32_t hxi_read_power(int dev_fd, uint8_t register_id, double* sen_value);
     int32_t hxi_select_rail(int dev_fd, uint8_t rail);
     void snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name);
     cJSON* json_load_file(const char* json_file_path);
@@ -817,7 +822,7 @@ Other changes to system state include:
 Iterates every top-level entry of `config_json` and populates one
 `sensor_state_t` record per entry into `sensors`. The snon_path for each
 sensor embeds `output_path`, the entry UUID, and `timestamp`. Returns
-`C_FAILURE` on the first entry lacking a valid `"rail"` or `"uuid"` field;
+`C_FAILURE` on the first entry lacking a valid `"register"` or `"uuid"` field;
 the loop exits immediately and `sensor_count_out` reflects the count of
 valid entries written before the error.
 
@@ -830,7 +835,7 @@ valid entries written before the error.
 | timestamp        | in        | const char*     | ISO 8601 string embedded in each sensor output file name                 |
 | sensors          | out       | sensor_state_t* | Caller-allocated array of at least C_MAX_SENSORS records to populate     |
 | sensor_count_out | out       | uint32_t*       | Set to the number of valid entries written into sensors                  |
-| return value     | out       | int32_t         | 0 on success; -1 if any entry is missing a valid "rail" or "uuid" field  |
+| return value     | out       | int32_t         | 0 on success; -1 if any entry is missing a valid "register" or "uuid" field  |
 
 Other changes to system state include: None.
 */
@@ -838,10 +843,13 @@ Other changes to system state include: None.
     {
         cJSON*      config_entry = NULL;
         cJSON*      rail_item = NULL;
+        cJSON*      register_item = NULL;
         cJSON*      uuid_item = NULL;
         uint32_t    count = 0U;
-        long        rail_parsed = 0;
+        uint32_t    rail_parsed = 0;
         char*       rail_end = NULL;
+        uint32_t    register_parsed = 0;
+        char*       register_end = NULL;
         int32_t     return_status = C_SUCCESS;
 
         REQUIRES(NULL != config_json, "NULL pointer passed for config_json");
@@ -856,28 +864,52 @@ Other changes to system state include: None.
         {
             ASSERT(count < C_MAX_SENSORS, "Sensor count exceeds C_MAX_SENSORS (%u)", C_MAX_SENSORS);
 
+            register_item = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_REGISTER_KEY);
             rail_item = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_RAIL_KEY);
             uuid_item = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_UUID_KEY);
 
-            if(NULL == rail_item || false == cJSON_IsString(rail_item))
+            if(NULL == register_item || false == cJSON_IsString(register_item))
             {
-                fprintf(stderr, "Config entry missing valid \"%s\" field\n", C_CONFIG_RAIL_KEY);
+                fprintf(stderr, "Config entry missing valid \"%s\" field\n", C_CONFIG_REGISTER_KEY);
                 return_status = C_FAILURE;
                 config_entry = NULL;
             }
-            else if(NULL == uuid_item || false == cJSON_IsString(uuid_item))
+
+            if(NULL == uuid_item || false == cJSON_IsString(uuid_item))
             {
                 fprintf(stderr, "Config entry missing valid \"%s\" field\n", C_CONFIG_UUID_KEY);
                 return_status = C_FAILURE;
                 config_entry = NULL;
             }
-            else
+
+            if(NULL != rail_item && false == cJSON_IsString(rail_item))
             {
-                rail_end = NULL;
-                // ASDFG-C 2026 5.25: VIOLATION: strtol returns long; cast to int32_t for rail_number.
-                // Safe as rail identifiers are small positive integers within int32_t range.
-                rail_parsed = strtol(rail_item->valuestring, &rail_end, 10);
-                sensors[count].rail_number = (int32_t) rail_parsed;
+                fprintf(stderr, "Invalid \"%s\" field\n", C_CONFIG_RAIL_KEY);
+                return_status = C_FAILURE;
+                config_entry = NULL;
+            }
+            
+            if(C_FAILURE != return_status)
+            {
+                if(NULL != rail_item)
+                {
+                    rail_end = NULL;
+                    // ASDFG-C 2026 5.25: VIOLATION: strtol returns long; cast to int32_t for rail_id.
+                    // Safe as rail identifiers are small positive integers within int32_t range.
+                    rail_parsed = strtol(rail_item->valuestring, &rail_end, 10);
+                }
+
+                sensors[count].rail_id = (int32_t) rail_parsed;
+
+                if(NULL != register_item)
+                {
+                    register_end = NULL;
+                    // ASDFG-C 2026 5.25: VIOLATION: strtol returns long; cast to int32_t for register_id.
+                    // Safe as rail identifiers are small positive integers within int32_t range.
+                    register_parsed = strtol(register_item->valuestring, &register_end, 10);
+                }
+                
+                sensors[count].register_id = (int32_t) register_parsed;
                 sensors[count].first_record = true;
                 sensors[count].snon_fd = -1;
                 sensors[count].senml_array = NULL;
@@ -915,7 +947,7 @@ Returns NULL if object allocation fails.
 | Parameter    | Direction | Type            | Description                                                      |
 | ------------ | --------- | --------------- | ---------------------------------------------------------------- |
 | sensor       | shared    | sensor_state_t* | Sensor state; first_record is set to false after the first call  |
-| wattage      | in        | double          | Power reading in watts stored under the "v" field                |
+| sen_value    | in        | double          | Sensor reading stored under the "v" field                        |
 | timestamp    | in        | const char*     | ISO 8601 string stored under the "t" field                       |
 | return value | out       | cJSON*          | Newly allocated cJSON object; NULL on allocation failure         |
 
@@ -923,7 +955,7 @@ Other changes to system state include:
 - Allocates heap memory for the returned cJSON object and its children.
   Memory is owned by the caller's senml_array and freed via cJSON_Delete.
 */
-    cJSON* hxi_build_senml_entry(sensor_state_t* sensor, double wattage, const char* timestamp)
+    cJSON* hxi_build_senml_entry(sensor_state_t* sensor, double sen_value, const char* timestamp)
     {
         cJSON*  entry = NULL;
         char    urn_base_name[64] = {0};
@@ -942,7 +974,7 @@ Other changes to system state include:
                 sensor->first_record = false;
             }
 
-            cJSON_AddItemToObjectCS(entry, "v", cJSON_CreateNumber(wattage));
+            cJSON_AddItemToObjectCS(entry, "v", cJSON_CreateNumber(sen_value));
             cJSON_AddItemToObjectCS(entry, "t", cJSON_CreateString(timestamp));
         }
 
@@ -1041,7 +1073,7 @@ Other changes to system state include:
     int32_t hxi_sensors_poll_once(int dev_fd, sensor_state_t* sensors, uint32_t sensor_count)
     {
         uint32_t    sensor_index = 0U;
-        double      wattage = 0.0;
+        double      sen_value = 0.0;
         cJSON*      entry = NULL;
         char        working_string[128] = {0};
         int32_t     return_status = C_SUCCESS;
@@ -1057,17 +1089,26 @@ Other changes to system state include:
             {
                 if(-1 != sensors[sensor_index].snon_fd)
                 {
-                    if(C_FAILURE == hxi_read_power(dev_fd, sensors[sensor_index].rail_number, &wattage))
+                    if(C_FAILURE == hxi_select_rail(dev_fd, sensors[sensor_index].rail_id))
                     {
-                        fprintf(stderr, "Error reading wattage for rail %d\n",
-                                sensors[sensor_index].rail_number);
+                        fprintf(stderr, "Unable to select output rail\n");
                         return_status = C_FAILURE;
                     }
-                    else
+        
+                    if(C_FAILURE != return_status)
                     {
-                        entry = hxi_build_senml_entry(&sensors[sensor_index], wattage, working_string);
-                        ASSERT(NULL != entry, "Memory allocation failed for SenML entry, sensor %u", sensor_index);
-                        cJSON_AddItemToArray(sensors[sensor_index].senml_array, entry);
+                        if(C_FAILURE == hxi_read_power(dev_fd, sensors[sensor_index].register_id, &sen_value))
+                        {
+                            fprintf(stderr, "Error reading sensor value for rail %d\n",
+                                    sensors[sensor_index].rail_id);
+                            return_status = C_FAILURE;
+                        }
+                        else
+                        {
+                            entry = hxi_build_senml_entry(&sensors[sensor_index], sen_value, working_string);
+                            ASSERT(NULL != entry, "Memory allocation failed for SenML entry, sensor %u", sensor_index);
+                            cJSON_AddItemToArray(sensors[sensor_index].senml_array, entry);
+                        }
                     }
                 }
 
@@ -1360,25 +1401,24 @@ Other changes to system state include:
     }
 
 /*
-## Read the wattage from one output rail of the HXi power supply
+## Read the sensor data from the HXi power supply
 
 Selects the specified rail by calling hxi_select_rail, sends a power-read
-command (0x03, 0x96) to the HXi device, reads the raw two-byte PMBus
+command (0x03, reg) to the HXi device, reads the raw two-byte PMBus
 LINEAR11 register from bytes [2] and [3] of the response payload, and
-converts the result to a double-precision wattage value via reg_to_value.
+converts the result to a double-precision sensor value via reg_to_value.
 
 ### Interactions
 
 | Parameter    | Direction | Type    | Description                                                                |
 | ------------ | --------- | ------- | -------------------------------------------------------------------------- |
 | dev_fd       | in        | int     | Open file descriptor for the HID raw device                                |
-| rail         | in        | uint8_t | Rail index; passed through unchanged to hxi_select_rail                    |
-| wattage      | out       | double* | Receives the decoded power value in watts; not modified on failure         |
+| register_id  | in        | uint8_t | Register index; determines which data to read                              |
+| sen_value    | out       | double* | Receives the decoded sensor value; not modified on failure                 |
 | return value | out       | int     | 0 on success; -1 if rail selection, I/O, or response validation fails      |
 
 Other changes to system state include:
 
-- Calls hxi_select_rail, which issues its own write and read on dev_fd.
 - Writes a further 64-byte command packet to dev_fd.
 - Reads a further 64-byte response packet from dev_fd.
 - Writes diagnostic messages to stderr on failure.
@@ -1387,24 +1427,17 @@ Other changes to system state include:
 
     // ASDFG-C 2026 5.15: VIOLATION: PMBus LINEAR11 decoded power values are rational numbers
     // with binary exponents; floating-point is required to faithfully represent the full range.
-    int32_t hxi_read_power(int dev_fd, uint8_t rail, double* wattage)
+    int32_t hxi_read_power(int dev_fd, uint8_t register_id, double* sen_value)
     {
         uint8_t     command[C_HXI_PACKET_LEN] = {0};
         uint8_t     response[C_HXI_PACKET_LEN] = {0};
         uint16_t    reg_contents = 0;
         
         REQUIRES(dev_fd >= 0, "Invalid file descriptor %d", dev_fd);
-        REQUIRES(rail <= C_HXI_RAIL_12V, "Rail index %u out of range", rail);
-        REQUIRES(NULL != wattage, "NULL pointer passed for wattage");
+        REQUIRES(NULL != sen_value, "NULL pointer passed for sensor value");
 
-        if(C_FAILURE == hxi_select_rail(dev_fd, rail))
-        {
-            fprintf(stderr, "Unable to select output rail\n");
-            return(C_FAILURE);
-        }
-        
         command[0] = C_HXI_PWR_CMD_LEN;
-        command[1] = C_HXI_PWR_READ_CMD;    // Read Power
+        command[1] = register_id;
         if(sizeof(command) != write(dev_fd, command, sizeof(command)))
         {
             fprintf(stderr, "Error writing command to device\n");
@@ -1424,18 +1457,12 @@ Other changes to system state include:
             fprintf(stderr, "Unexpected response length %i (expected %i)\n", response[0], C_HXI_PWR_CMD_LEN);
             return(C_FAILURE);
         }
-        
-        if(C_HXI_PWR_READ_CMD != response[1])
-        {
-            fprintf(stderr, "Unexpected response type '0x%02x' (expected 0x%02x)\n", response[1], C_HXI_PWR_READ_CMD);
-            return(C_FAILURE);
-        }
-        
+                
         // ASDFG-C 2026 5.25: VIOLATION: Cast required to assemble uint16_t from two uint8_t bytes.
         reg_contents = (uint16_t) ((uint16_t) response[2] | ((uint16_t) response[3] << 8U));
-        *wattage = reg_to_value(reg_contents);
+        *sen_value = reg_to_value(reg_contents);
         
-        ENSURES(*wattage >= 0.0, "Decoded wattage is unexpectedly negative: %f", *wattage);
+        ENSURES(*sen_value >= 0.0, "Decoded sensor value is unexpectedly negative: %f", *sen_value);
 
         return(C_SUCCESS);
     }

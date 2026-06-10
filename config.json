@@ -1,4 +1,8 @@
 {
+	"Total Output Watts": {
+		"register": "238",
+		"measurand": "watts"
+	},
 	"3.3V Output Watts": {
 		"rail": "0",
 		"register": "150",

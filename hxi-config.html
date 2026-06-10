@@ -380,16 +380,6 @@ Other changes to system state include:
 
         if(C_VALIDATE_SUCCESS == result)
         {
-            rail_field = cJSON_GetObjectItemCaseSensitive(entry, "rail");
-
-            if(NULL == rail_field)
-            {
-                result = C_VALIDATE_ERR_MISSING_FIELD;
-            }
-        }
-
-        if(C_VALIDATE_SUCCESS == result)
-        {
             register_field = cJSON_GetObjectItemCaseSensitive(entry, "register");
 
             if(NULL == register_field)
@@ -408,9 +398,15 @@ Other changes to system state include:
             }
         }
 
+        // Rail field is optional.
         if(C_VALIDATE_SUCCESS == result)
         {
-            result = hxi_string_field_validate(rail_field);
+            rail_field = cJSON_GetObjectItemCaseSensitive(entry, "rail");
+
+            if(NULL != rail_field)
+            {
+                result = hxi_string_field_validate(rail_field);
+            }
         }
 
         if(C_VALIDATE_SUCCESS == result)
