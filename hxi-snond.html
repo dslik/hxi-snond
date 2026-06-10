@@ -102,6 +102,7 @@ section 7.4.3.
     
     // Polling interval for hxi_collect_values
     #define C_POLL_INTERVAL_NS  100000000L  // 100 ms in nanoseconds (type int, assigned to long tv_nsec)
+    #define C_NS_PER_SECOND     1000000000  // 1 s in nanoseconds
 
     // SNON JSON field keys
     #define C_SNON_EID_KEY          "eID"       // SNON entity identifier field key
@@ -118,9 +119,7 @@ section 7.4.3.
     #define C_SNON_EID_LEN          46U         // Buffer size for "urn:uuid:<UUID>\0" (9 + 36 + 1)
 
     // Config JSON field keys
-    #define C_CONFIG_SENSORS_KEY    "sensors"   // Top-level array key for the sensor list
     #define C_CONFIG_RAIL_KEY       "rail"      // Per-sensor key for the rail to read data from
-    #define C_CONFIG_NAME_KEY       "name"      // Per-sensor key for the human-readable name
     #define C_CONFIG_UUID_KEY       "uuid"      // Per-sensor key added to hold the SNON UUID
 
     // Miscellaneous
@@ -168,6 +167,7 @@ Local functions
     bool is_valid_uuid(const char* uuid_value);
     int32_t generate_random_uuid(char* uuid_value);
     char* iso8601_time(char* buf, size_t len);
+    void string_replace_char(char* string, char find_byte, char replace_byte);
     static void signal_handler(int signum);
 
     bool filename_has_json_ext(const char* filename);
@@ -232,7 +232,7 @@ Other changes to system state include:
         int32_t                 opt = 0;
         const char*             device_name = "/dev/hidraw0";
         const char*             output_path = "./";
-        const char*             config_path = "./sensors.json";
+        const char*             config_path = "./config.json";
         const char*             uuid_arg = NULL;
         char                    device_uuid[C_UUID_LEN] = {0};
         int32_t                 dev_fd = 0;
@@ -377,14 +377,13 @@ Other changes to system state include:
             return(EXIT_FAILURE);
         }
 
-        if(C_FAILURE == hxi_config_json_validate(config_json))
+        if(C_SUCCESS != hxi_config_json_validate(config_json))
         {
             fprintf(stderr, "Invalid configuration JSON file contents\n");
             close(dev_fd);
             cJSON_Delete(config_json);
             return(EXIT_FAILURE);
         }
-
         
         // ===========================================================
         // Create SNON device and sensor records if they do not exist
@@ -636,6 +635,8 @@ Other changes to system state include:
             cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
             cJSON_AddItemToObjectCS(snon_root, "eR", relation_object);
 
+            // FIXME - Add link to measurand
+
             snon_output = cJSON_PrintUnformatted(snon_root);
             ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
 
@@ -885,6 +886,10 @@ Other changes to system state include: None.
                          "%s/%s/%s-%s.json",
                          output_path, sensors[count].sensor_uuid,
                          sensors[count].sensor_uuid, timestamp);
+
+                // Switch out ISO 8601 ':' for '-' to be file system safe
+                string_replace_char(sensors[count].snon_path, ':', '-');
+
                 count = count + 1U;
                 config_entry = config_entry->next;
             }
@@ -1112,7 +1117,7 @@ Other changes to system state include:
 
         while(sensor_index < sensor_count)
         {
-            if(-1 != sensors[sensor_index].snon_fd)
+            if(C_FAILURE != sensors[sensor_index].snon_fd)
             {
                 snon_output = cJSON_PrintUnformatted(sensors[sensor_index].senml_array);
                 ASSERT(NULL != snon_output,
@@ -1181,8 +1186,14 @@ Other changes to system state include:
         uint32_t            sensor_index = 0U;
         char                working_string[128] = {0};
         struct sigaction    signal_action = {0};
-        struct timespec     poll_interval = {0, C_POLL_INTERVAL_NS};
+        struct sigaction    old_signal_action = {0};
         bool                should_poll = false;
+        struct timespec     poll_start = {0};
+        struct timespec     poll_end = {0};
+        struct timespec     sleep_duration = {0};
+        int64_t             poll_start_nsec = 0;
+        int64_t             poll_end_nsec = 0;
+        int64_t             remaining_ns = 0;
         int32_t             return_status = C_SUCCESS;
 
         REQUIRES(NULL != config_json, "NULL pointer passed for config_json");
@@ -1191,22 +1202,7 @@ Other changes to system state include:
 
         iso8601_time(working_string, sizeof(working_string));
 
-        return_status = hxi_config_load_sensors(config_json, output_path, working_string,
-                                                sensors, &sensor_count);
-
-        if(C_SUCCESS == return_status)
-        {
-            signal_action.sa_handler = signal_handler;
-            signal_action.sa_flags = SA_RESTART;
-            sigemptyset(&signal_action.sa_mask);
-
-            if(C_FAILURE == sigaction(SIGINT, &signal_action, NULL))
-            {
-                fprintf(stderr, "Error setting up signal handler\n");
-                perror("sigaction");
-                return_status = C_FAILURE;
-            }
-        }
+        return_status = hxi_config_load_sensors(config_json, output_path, working_string, sensors, &sensor_count);
 
         if(C_SUCCESS == return_status)
         {
@@ -1228,25 +1224,66 @@ Other changes to system state include:
             should_poll = (0U < active_count);
         }
 
+        if(C_SUCCESS == return_status)
+        {
+            signal_action.sa_handler = signal_handler;
+            signal_action.sa_flags = SA_RESTART;
+            sigemptyset(&signal_action.sa_mask);
+
+            if(C_FAILURE == sigaction(SIGINT, &signal_action, &old_signal_action))
+            {
+                fprintf(stderr, "Error setting up signal handler\n");
+                perror("sigaction");
+                return_status = C_FAILURE;
+            }
+        }
+
         while(true == should_poll)
         {
             if(true == g_abort_collect)
             {
                 should_poll = false;
             }
-            else if(C_FAILURE == hxi_sensors_poll_once(dev_fd, sensors, sensor_count))
-            {
-                fprintf(stderr, "Error polling sensors; stopping collection\n");
-                return_status = C_FAILURE;
-                should_poll = false;
-            }
             else
             {
-                nanosleep(&poll_interval, NULL);
+                clock_gettime(CLOCK_MONOTONIC, &poll_start);
+
+                if(C_FAILURE == hxi_sensors_poll_once(dev_fd, sensors, sensor_count))
+                {
+                    fprintf(stderr, "Error polling sensors; stopping collection\n");
+                    return_status = C_FAILURE;
+                    should_poll = false;
+                }
+                else
+                {
+                    clock_gettime(CLOCK_MONOTONIC, &poll_end);
+
+                    poll_start_nsec = ((int64_t) poll_start.tv_sec * C_NS_PER_SECOND) + (int64_t) poll_start.tv_nsec;
+                    poll_end_nsec = ((int64_t) poll_end.tv_sec * C_NS_PER_SECOND) + (int64_t) poll_end.tv_nsec;
+
+                    remaining_ns = C_POLL_INTERVAL_NS - (poll_end_nsec - poll_start_nsec);
+
+                    if(0 < remaining_ns)
+                    {
+                        sleep_duration.tv_sec = (time_t) (remaining_ns / C_NS_PER_SECOND);
+                        sleep_duration.tv_nsec = (long) (remaining_ns % C_NS_PER_SECOND);
+                        nanosleep(&sleep_duration, NULL);
+                    }
+                }
             }
         }
 
-        // Always attempt write and close to flush data collected before any error
+        if(C_SUCCESS == return_status)
+        {
+            if(C_FAILURE == sigaction(SIGINT, &old_signal_action, NULL))
+            {
+                fprintf(stderr, "Error unregistering signal handler\n");
+                perror("sigaction");
+                return_status = C_FAILURE;
+            }
+        }
+
+        // Write out collected data
         if(C_FAILURE == hxi_sensors_write_and_close(sensors, sensor_count))
         {
             return_status = C_FAILURE;
@@ -2091,6 +2128,55 @@ Other changes to system state include:
         ENSURES(NULL != buf, "buf is unexpectedly NULL on success path");
 
         return(buf);
+    }
+
+
+/*
+## string_replace_char
+
+Replaces every occurrence of a target byte value within a null-terminated
+string with a substitute byte value. The string is modified in place and its
+length is unchanged after the call.
+
+This function operates on raw bytes, not Unicode code points. It is safe to
+use on UTF-8 encoded strings only when both `find_byte` and `replace_byte` are
+single-byte ASCII values (U+0000 to U+007F). Replacing bytes that form part of
+a multi-byte UTF-8 sequence may produce invalid UTF-8 output.
+
+### Interactions
+
+| Parameter    | Direction | Type   | Description                                                                     |
+| ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
+| string       | in/out    | char*  | Pointer to the null-terminated string to modify in place. Must not be NULL.     |
+| find_byte    | in        | char   | The byte value to search for within `string`.                                   |
+| replace_byte | in        | char   | The byte value to substitute for each occurrence of `find_byte`. Must not be the null terminator (`'\0'`). |
+
+Other changes to system state include:
+
+- The string pointed to by `string` is modified in place.
+*/
+
+    void string_replace_char(char* string, char find_byte, char replace_byte)
+    {
+        uint32_t    string_length = 0U;
+        uint32_t    index = 0U;
+
+        REQUIRES(NULL != string, "NULL value passed for string");
+        REQUIRES('\0' != replace_byte, "replace_byte must not be the null terminator");
+
+        string_length = strlen(string);
+
+        while(index < string_length)
+        {
+            if(string[index] == find_byte)
+            {
+                string[index] = replace_byte;
+            }
+
+            index = index + 1U;
+        }
+
+        ENSURES(strlen(string) == string_length, "String length changed unexpectedly: expected %zu, got %zu", string_length, strlen(string));
     }
 
 /*
