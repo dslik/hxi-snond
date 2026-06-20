@@ -49,7 +49,8 @@ Known issues:
     #include <linux/hidraw.h>   // HIDIOCGRAWINFO, struct hidraw_devinfo
     
     // Local includes
-    #include "dbc.h"            // Design-by-contract library
+    #include "asdfg-c-types.h"  // Type conversion helper functions
+    #include "asdfg-c-dbc.h"    // Design-by-contract library
     #include "hxi-config.h"     // Configuration validation
     #include "cJSON.h"          // cJSON library
 
@@ -149,7 +150,7 @@ expected config file.
         bool        first_record;
         char        sensor_uuid[C_UUID_LEN];
         char        snon_path[PATH_MAX];
-        int         snon_fd;
+        int32_t     snon_fd;
         cJSON*      senml_array;
     } sensor_state_t;
 
@@ -163,9 +164,9 @@ Local functions
     int32_t hxi_config_json_validate(cJSON* config_json);
     int32_t hxi_create_snon_definitions(cJSON* config_json, const char* output_path, char* device_uuid);
     int32_t hxi_create_sensor_record(const char* output_path, const char* device_uuid, const char* sensor_name);
-    int32_t hxi_collect_values(cJSON* config_json, const char* output_path, int dev_fd);
-    int32_t hxi_read_power(int dev_fd, uint8_t register_id, double* sen_value);
-    int32_t hxi_select_rail(int dev_fd, uint8_t rail);
+    int32_t hxi_collect_values(cJSON* config_json, const char* output_path, int32_t dev_fd);
+    int32_t hxi_read_power(int32_t dev_fd, uint8_t register_id, double* sen_value);
+    int32_t hxi_select_rail(int32_t dev_fd, uint8_t rail);
     void snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name);
     cJSON* json_load_file(const char* json_file_path);
     double reg_to_value(uint16_t reg);
@@ -173,7 +174,9 @@ Local functions
     int32_t generate_random_uuid(char* uuid_value);
     char* iso8601_time(char* buf, size_t len);
     void string_replace_char(char* string, char find_byte, char replace_byte);
-    static void signal_handler(int signum);
+
+    // ASDFG-C 6.18 VIOLATION: POSIX sigaction handler signature requires int signum; no fixed-width alternative
+    static void signal_handler(int32_t signum);
 
     bool filename_has_json_ext(const char* filename);
     bool snon_sensor_is_child_of(cJSON* sensor_json, const char* device_uuid);
@@ -346,7 +349,7 @@ Other changes to system state include:
         
         // ===========================================================
         // Initialize a connecion to the HXi Power Supply
-        dev_fd = open(device_name, O_RDWR);
+        dev_fd = int32_from_int(open(device_name, O_RDWR));
         
         memset(&hid_info, 0, sizeof(hid_info));
         if(C_FAILURE == ioctl(dev_fd, HIDIOCGRAWINFO, &hid_info))
@@ -482,7 +485,7 @@ Other changes to system state include:
 
         // Create the device record JSON file
         snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, device_uuid);
-        snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+        snon_fd = int32_from_int(open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR));
 
         if(C_FAILURE == snon_fd)
         {
@@ -508,8 +511,7 @@ Other changes to system state include:
             output_len = strlen(snon_output);
             bytes_written = write(snon_fd, snon_output, output_len);
 
-            // ASDFG-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with
-            // output_len (size_t); safe because bytes_written is checked for < 0 first.
+            // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with output_len, safe because bytes_written is checked for < 0 first
             if((bytes_written < 0) || ((size_t) bytes_written != output_len))
             {
                 fprintf(stderr, "Error writing SNON device record\n");
@@ -608,7 +610,7 @@ Other changes to system state include:
         {
             // Open the sensor record file for writing
             snprintf(snon_path, sizeof(snon_path), "%s%s.json", output_path, sensor_uuid);
-            snon_fd = open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+            snon_fd = int32_from_int(open(snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR));
 
             if(C_FAILURE == snon_fd)
             {
@@ -648,8 +650,7 @@ Other changes to system state include:
             output_len = strlen(snon_output);
             bytes_written = write(snon_fd, snon_output, output_len);
 
-            // ASDFG-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with
-            // output_len (size_t); safe because bytes_written is checked for < 0 first.
+            // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with output_len, safe because bytes_written is checked for < 0 first
             if((bytes_written < 0) || ((size_t) bytes_written != output_len))
             {
                 fprintf(stderr, "Error writing SNON sensor record\n");
@@ -758,7 +759,7 @@ Other changes to system state include:
         
         REQUIRES(NULL != json_file_path, "NULL pointer passed for json_file_path");
         
-        json_fd = open(json_file_path, O_RDONLY);
+        json_fd = int32_from_int(open(json_file_path, O_RDONLY));
         
         if(C_FAILURE == json_fd)
         {
@@ -776,8 +777,7 @@ Other changes to system state include:
         
         file_length = file_stat.st_size;
         
-        // ASDFG-C 2026 5.25: VIOLATION: cast from off_t to size_t to pass to
-        // malloc and read; safe because file_length is non-negative (fstat succeeds).
+        // ASDFG-C 6.35 VIOLATION: off_t cast to size_t for malloc and read, safe because fstat succeeded and file_length is non-negative
         read_buffer = malloc((size_t) (file_length + 1));
         
         if(NULL == read_buffer)
@@ -894,8 +894,8 @@ Other changes to system state include: None.
                 if(NULL != rail_item)
                 {
                     rail_end = NULL;
-                    // ASDFG-C 2026 5.25: VIOLATION: strtol returns long; cast to int32_t for rail_id.
-                    // Safe as rail identifiers are small positive integers within int32_t range.
+                    
+                    // ASDFG-C 6.35 VIOLATION: strtol return value cast to uint8_t; safe because rail identifiers are small positive integers
                     rail_parsed = strtol(rail_item->valuestring, &rail_end, 10);
                 }
 
@@ -904,8 +904,8 @@ Other changes to system state include: None.
                 if(NULL != register_item)
                 {
                     register_end = NULL;
-                    // ASDFG-C 2026 5.25: VIOLATION: strtol returns long; cast to int32_t for register_id.
-                    // Safe as rail identifiers are small positive integers within int32_t range.
+                    
+                    // ASDFG-C 6.35 VIOLATION: strtol return value cast to uint8_t; safe because register identifiers are small positive integers
                     register_parsed = strtol(register_item->valuestring, &register_end, 10);
                 }
                 
@@ -914,10 +914,7 @@ Other changes to system state include: None.
                 sensors[count].snon_fd = -1;
                 sensors[count].senml_array = NULL;
                 strncpy(sensors[count].sensor_uuid, uuid_item->valuestring, C_UUID_LEN - 1U);
-                snprintf(sensors[count].snon_path, sizeof(sensors[count].snon_path),
-                         "%s/%s/%s-%s.json",
-                         output_path, sensors[count].sensor_uuid,
-                         sensors[count].sensor_uuid, timestamp);
+                snprintf(sensors[count].snon_path, sizeof(sensors[count].snon_path), "%s/%s/%s-%s.json", output_path, sensors[count].sensor_uuid, sensors[count].sensor_uuid, timestamp);
 
                 // Switch out ISO 8601 ':' for '-' to be file system safe
                 string_replace_char(sensors[count].snon_path, ':', '-');
@@ -931,7 +928,6 @@ Other changes to system state include: None.
 
         return(return_status);
     }
-
 
 /*
 ## Build a SenML entry object for one sensor reading
@@ -981,7 +977,6 @@ Other changes to system state include:
         return(entry);
     }
 
-
 /*
 ## Open output files for all sensors
 
@@ -1017,23 +1012,18 @@ Other changes to system state include:
             {
                 if(C_FAILURE == access(sensors[sensor_index].snon_path, R_OK | W_OK))
                 {
-                    sensors[sensor_index].snon_fd = open(
-                        sensors[sensor_index].snon_path,
-                        O_RDWR | O_CREAT | O_TRUNC,
-                        S_IRUSR | S_IWUSR);
+                    sensors[sensor_index].snon_fd = int32_from_int(open(sensors[sensor_index].snon_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR));
 
                     if(C_FAILURE == sensors[sensor_index].snon_fd)
                     {
-                        fprintf(stderr, "Error creating sensor record file: %s\n",
-                                sensors[sensor_index].snon_path);
+                        fprintf(stderr, "Error creating sensor record file: %s\n", sensors[sensor_index].snon_path);
                         perror("open");
                         return_status = C_FAILURE;
                     }
                     else
                     {
                         sensors[sensor_index].senml_array = cJSON_CreateArray();
-                        ASSERT(NULL != sensors[sensor_index].senml_array,
-                               "Memory allocation failed for SenML array, sensor %u", sensor_index);
+                        ASSERT(NULL != sensors[sensor_index].senml_array, "Memory allocation failed for SenML array, sensor %u", sensor_index);
                     }
                 }
 
@@ -1048,7 +1038,6 @@ Other changes to system state include:
         return(return_status);
     }
 
-
 /*
 ## Poll all sensors once and append readings to their SenML arrays
 
@@ -1062,7 +1051,7 @@ read error.
 
 | Parameter    | Direction | Type            | Description                                                     |
 | ------------ | --------- | --------------- | --------------------------------------------------------------- |
-| dev_fd       | in        | int             | Open file descriptor for the HID raw device                     |
+| dev_fd       | in        | int32_t         | Open file descriptor for the HID raw device                     |
 | sensors      | shared    | sensor_state_t* | Sensor state array; senml_array and first_record may be written |
 | sensor_count | in        | uint32_t        | Number of valid entries in sensors                              |
 | return value | out       | int32_t         | 0 on success; -1 if any hxi_read_power call fails               |
@@ -1070,7 +1059,7 @@ read error.
 Other changes to system state include:
 - Allocates heap memory via cJSON for each SenML entry object appended.
 */
-    int32_t hxi_sensors_poll_once(int dev_fd, sensor_state_t* sensors, uint32_t sensor_count)
+    int32_t hxi_sensors_poll_once(int32_t dev_fd, sensor_state_t* sensors, uint32_t sensor_count)
     {
         uint32_t    sensor_index = 0U;
         double      sen_value = 0.0;
@@ -1099,8 +1088,7 @@ Other changes to system state include:
                     {
                         if(C_FAILURE == hxi_read_power(dev_fd, sensors[sensor_index].register_id, &sen_value))
                         {
-                            fprintf(stderr, "Error reading sensor value for rail %d\n",
-                                    sensors[sensor_index].rail_id);
+                            fprintf(stderr, "Error reading sensor value for rail %d\n", sensors[sensor_index].rail_id);
                             return_status = C_FAILURE;
                         }
                         else
@@ -1122,7 +1110,6 @@ Other changes to system state include:
 
         return(return_status);
     }
-
 
 /*
 ## Serialise and write all SenML arrays, then close all files
@@ -1161,14 +1148,12 @@ Other changes to system state include:
             if(C_FAILURE != sensors[sensor_index].snon_fd)
             {
                 snon_output = cJSON_PrintUnformatted(sensors[sensor_index].senml_array);
-                ASSERT(NULL != snon_output,
-                       "Memory allocation failed serialising SenML array for sensor %u", sensor_index);
+                ASSERT(NULL != snon_output, "Memory allocation failed serialising SenML array for sensor %u", sensor_index);
 
                 data_len = strlen(snon_output);
                 data_written_len = write(sensors[sensor_index].snon_fd, snon_output, data_len);
 
-                // ASDFG-C 2026 5.25: VIOLATION: cast ssize_t to size_t to compare with data_len
-                // (size_t); safe because data_written_len is checked for < 0 first.
+                // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with data_len; safe because data_written_len is checked for < 0 first
                 if((data_written_len < 0) || ((size_t) data_written_len != data_len))
                 {
                     fprintf(stderr, "Error writing SNON value record for sensor %u\n", sensor_index);
@@ -1189,7 +1174,6 @@ Other changes to system state include:
         return(return_status);
     }
 
-
 /*
 ## Collect HXi power values and write SNON SenML records for all sensors
 
@@ -1207,7 +1191,7 @@ and closed.
 | --------------- | --------- | ------------ | ------------------------------------------------------------------------ |
 | config_json     | in        | cJSON*       | UUID-populated config object; all entries are collected                  |
 | output_path     | in        | const char*  | Base directory under which sensor record files are created               |
-| dev_fd          | in        | int          | Open file descriptor for the HID raw device                              |
+| dev_fd          | in        | int32_t      | Open file descriptor for the HID raw device                              |
 | return value    | out       | int32_t      | 0 on success; -1 on any config, I/O, or device error                    |
 | g_abort_collect | shared    | sig_atomic_t | Global flag; polled each loop iteration; written true by signal_handler  |
 
@@ -1219,7 +1203,7 @@ Other changes to system state include:
 - Writes diagnostic messages to stderr on failure.
 
 */
-    int32_t hxi_collect_values(cJSON* config_json, const char* output_path, int dev_fd)
+    int32_t hxi_collect_values(cJSON* config_json, const char* output_path, int32_t dev_fd)
     {
         sensor_state_t      sensors[C_MAX_SENSORS] = {0};
         uint32_t            sensor_count = 0U;
@@ -1346,9 +1330,9 @@ indicating success.
 
 | Parameter    | Direction | Type    | Description                                                             |
 | ------------ | --------- | ------- | ----------------------------------------------------------------------- |
-| dev_fd       | in        | int     | Open file descriptor for the HID raw device                             |
+| dev_fd       | in        | int32_t | Open file descriptor for the HID raw device                             |
 | rail         | in        | uint8_t | Rail index to select: 0 = 3.3 V, 1 = 5 V, 2 = 12 V                    |
-| return value | out       | int     | 0 on success; -1 if the write, read, or response validation fails       |
+| return value | out       | int32_t | 0 on success; -1 if the write, read, or response validation fails       |
 
 Other changes to system state include:
 
@@ -1358,7 +1342,7 @@ Other changes to system state include:
 
 */
 
-    int32_t hxi_select_rail(int dev_fd, uint8_t rail)
+    int32_t hxi_select_rail(int32_t dev_fd, uint8_t rail)
     {
         uint8_t     command[C_HXI_PACKET_LEN] = {0};
         uint8_t     response[C_HXI_PACKET_LEN] = {0};
@@ -1412,10 +1396,10 @@ converts the result to a double-precision sensor value via reg_to_value.
 
 | Parameter    | Direction | Type    | Description                                                                |
 | ------------ | --------- | ------- | -------------------------------------------------------------------------- |
-| dev_fd       | in        | int     | Open file descriptor for the HID raw device                                |
+| dev_fd       | in        | int32_t | Open file descriptor for the HID raw device                                |
 | register_id  | in        | uint8_t | Register index; determines which data to read                              |
 | sen_value    | out       | double* | Receives the decoded sensor value; not modified on failure                 |
-| return value | out       | int     | 0 on success; -1 if rail selection, I/O, or response validation fails      |
+| return value | out       | int32_t | 0 on success; -1 if rail selection, I/O, or response validation fails      |
 
 Other changes to system state include:
 
@@ -1425,9 +1409,8 @@ Other changes to system state include:
 
 */
 
-    // ASDFG-C 2026 5.15: VIOLATION: PMBus LINEAR11 decoded power values are rational numbers
-    // with binary exponents; floating-point is required to faithfully represent the full range.
-    int32_t hxi_read_power(int dev_fd, uint8_t register_id, double* sen_value)
+    // ASDFG-C 6.23 VIOLATION: PMBus LINEAR11 decoded power values are rational numbers with binary exponents, floating-point is required to faithfully represent the full range
+    int32_t hxi_read_power(int32_t dev_fd, uint8_t register_id, double* sen_value)
     {
         uint8_t     command[C_HXI_PACKET_LEN] = {0};
         uint8_t     response[C_HXI_PACKET_LEN] = {0};
@@ -1458,7 +1441,7 @@ Other changes to system state include:
             return(C_FAILURE);
         }
                 
-        // ASDFG-C 2026 5.25: VIOLATION: Cast required to assemble uint16_t from two uint8_t bytes.
+        // ASDFG-C 6.35 VIOLATION: Casts required to assemble uint16_t from two uint8_t bytes; no conversion helper applies to multi-byte assembly
         reg_contents = (uint16_t) ((uint16_t) response[2] | ((uint16_t) response[3] << 8U));
         *sen_value = reg_to_value(reg_contents);
         
@@ -1612,7 +1595,7 @@ Other changes to system state include:
 
         REQUIRES(NULL != sensor_json, "NULL pointer passed for sensor_json");
         REQUIRES(NULL != uuid_buf, "NULL pointer passed for uuid_buf");
-        REQUIRES(C_UUID_LEN >= buf_len, "buf_len %zu is smaller than required %u", buf_len, C_UUID_LEN);
+        REQUIRES(C_UUID_LEN <= buf_len, "buf_len %zu is smaller than required %u", buf_len, C_UUID_LEN);
 
         eid_item = cJSON_GetObjectItemCaseSensitive(sensor_json, C_SNON_EID_KEY);
 
@@ -1948,8 +1931,7 @@ Bit layout of the 16-bit register word:
 
 */
 
-    // ASDFG-C 2026 5.15: VIOLATION: PMBus LINEAR11 values are rational numbers with
-    // binary exponents; floating-point is the most faithful representation.
+    // ASDFG-C 6.23 VIOLATION: PMBus LINEAR11 values are rational numbers with binary exponents; floating-point is the most faithful representation
     double reg_to_value(uint16_t reg)
     {
         int16_t exponent = 0;
@@ -2005,10 +1987,7 @@ UTF-8 string handling requirement of Rule 1.2.
         
         while(char_index < C_UUID_STRLEN)
         {
-            if(C_UUID_HYPHEN_1 == char_index 
-               || C_UUID_HYPHEN_2 == char_index 
-               || C_UUID_HYPHEN_3 == char_index
-               || C_UUID_HYPHEN_4 == char_index)
+            if(C_UUID_HYPHEN_1 == char_index || C_UUID_HYPHEN_2 == char_index || C_UUID_HYPHEN_3 == char_index || C_UUID_HYPHEN_4 == char_index)
             {
                 if('-' != uuid_value[char_index])
                 {
@@ -2041,10 +2020,10 @@ The caller must supply a buffer of at least 37 bytes.
 
 ### Interactions
 
-| Parameter    | Direction | Type  | Description                                                                |
-| ------------ | --------- | ----- | -------------------------------------------------------------------------- |
-| uuid_value   | out       | char* | Caller-allocated buffer of at least 37 bytes; receives the UUID string     |
-| return value | out       | int   | 0 on success; -1 if /dev/urandom cannot be opened or read                  |
+| Parameter    | Direction | Type    | Description                                                                |
+| ------------ | --------- | ------- | -------------------------------------------------------------------------- |
+| uuid_value   | out       | char*   | Caller-allocated buffer of at least 37 bytes; receives the UUID string     |
+| return value | out       | int32_t | 0 on success; -1 if /dev/urandom cannot be opened or read                  |
 
 Other changes to system state include:
 
@@ -2057,11 +2036,11 @@ Other changes to system state include:
     int32_t generate_random_uuid(char* uuid_value)
     {
         uint8_t     uuid_bytes[16] = {0};
-        int         urandom_fd = -1;
+        int32_t     urandom_fd = -1;
         
         REQUIRES(NULL != uuid_value, "NULL pointer passed for uuid_value");
 
-        urandom_fd = open("/dev/urandom", O_RDONLY);
+        urandom_fd = int32_from_int(open("/dev/urandom", O_RDONLY));
         
         if(C_FAILURE == urandom_fd)
         {
@@ -2083,14 +2062,7 @@ Other changes to system state include:
         uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x40U; // Version 4
         uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80U; // Variant 1
         
-        snprintf(uuid_value, C_UUID_LEN,
-            "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-            uuid_bytes[0],  uuid_bytes[1],  uuid_bytes[2],  uuid_bytes[3],
-            uuid_bytes[4],  uuid_bytes[5],
-            uuid_bytes[6],  uuid_bytes[7],
-            uuid_bytes[8],  uuid_bytes[9],
-            uuid_bytes[10], uuid_bytes[11], uuid_bytes[12],
-            uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]);
+        snprintf(uuid_value, C_UUID_LEN, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", uuid_bytes[0],  uuid_bytes[1],  uuid_bytes[2],  uuid_bytes[3], uuid_bytes[4],  uuid_bytes[5], uuid_bytes[6],  uuid_bytes[7], uuid_bytes[8],  uuid_bytes[9], uuid_bytes[10], uuid_bytes[11], uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]);
         
         ENSURES(C_UUID_STRLEN == strlen(uuid_value), "Generated UUID has unexpected length %zu", strlen(uuid_value));
 
@@ -2128,7 +2100,7 @@ Other changes to system state include:
     char* iso8601_time(char* buf, size_t len)
     {
         struct timespec     ts = {0};
-        struct tm           utc_time = {0};;
+        struct tm           utc_time = {0};
         
         REQUIRES(NULL != buf, "NULL pointer passed for buf");
         REQUIRES(len >= C_ISO8601_LEN, "Buffer length %zu is smaller than required %u", len, C_ISO8601_LEN);
@@ -2143,20 +2115,12 @@ Other changes to system state include:
             return(NULL);
         }
         
-        snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02d.%06ldZ",
-            utc_time.tm_year + 1900,
-            utc_time.tm_mon  + 1,
-            utc_time.tm_mday,
-            utc_time.tm_hour,
-            utc_time.tm_min,
-            utc_time.tm_sec,
-            (long) (ts.tv_nsec / 1000L));
+        snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02d.%06ldZ", utc_time.tm_year + 1900, utc_time.tm_mon  + 1, utc_time.tm_mday, utc_time.tm_hour, utc_time.tm_min, utc_time.tm_sec, (long) (ts.tv_nsec / 1000u));
         
         ENSURES(NULL != buf, "buf is unexpectedly NULL on success path");
 
         return(buf);
     }
-
 
 /*
 ## string_replace_char
@@ -2254,4 +2218,4 @@ Other changes to system state include:
         }
     }
 
-//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>

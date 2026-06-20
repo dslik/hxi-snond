@@ -1,0 +1,106 @@
+//<!DOCTYPE html><html><title>ASDFG-C Types Library</title><xmp theme="united" style="display:none;">
+
+    // ---------------------------------------------------------------------------------
+    // asdfg-c-types - Integer type conversion helpers
+    // ---------------------------------------------------------------------------------
+    // Implements the conversion helper functions declared in asdfg-c-types.h. These
+    // functions form the primitive layer of the conversion helper pattern (rule 6.35),
+    // bridging between the C standard types and the fixed-width stdint type.
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+
+    #include <stdint.h>         // Fixed-width integer types (int32_t) and bounds (INT32_MIN, INT32_MAX)
+    #include <limits.h>         // Platform int bounds (INT_MIN, INT_MAX)
+    #include <stdbool.h>        // true, false
+
+    // Local includes
+    #include "asdfg-c-types.h"  // Declarations of int32_from_int and int_from_int32
+    #include "asdfg-c-dbc.h"    // REQUIRES, ENSURES, and ASSERT contract macros
+
+/*
+## Integer type conversion helpers
+
+This file implements primitive conversion helper functions declared in
+`asdfg-c-types.h`. They form the lowest layer of the conversion helper pattern
+required by rule 6.35, bridging between the C standard type (whose width
+is platform-defined) and the fixed-width types from `<stdint.h>`.
+
+On the Linux target required by rule 11.1, `int` and `int32_t` are both 32-bit
+signed types with identical value ranges, so the REQUIRES range checks in each
+function are always satisfied on that target. The checks are retained to make
+the valid input range explicit and to keep the functions portable to any future
+target where `int` and `int32_t` have different widths.
+*/
+
+/*
+## int32 from int
+
+Converts a value of the platform-dependent C `int` type to the fixed-width
+`int32_t` type. The caller must ensure that the value is representable as a
+32-bit signed integer; the function enforces this precondition with REQUIRES
+checks against `INT32_MIN` and `INT32_MAX` from `<stdint.h>`.
+
+### Interactions
+
+| Parameter | Direction | Type    | Description                                               |
+| --------- | --------- | ------- | --------------------------------------------------------- |
+| input     | in        | int     | The platform-dependent integer value to convert.          |
+| return    | out       | int32_t | The input value as a fixed-width 32-bit signed integer.   |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    int32_t int32_from_int(int input)
+    {
+        int32_t result = 0;
+
+        REQUIRES(input >= INT32_MIN, "input value is below the INT32_MIN bound");
+        REQUIRES(input <= INT32_MAX, "input value is above the INT32_MAX bound");
+
+        result = input;
+
+        ENSURES(result == input, "Conversion did not preserve the integer value");
+
+        return(result);
+    }
+
+/*
+## int from int32
+
+Converts a value of the fixed-width `int32_t` type to the platform-dependent
+C `int` type. The caller must ensure that the value is representable as a
+platform `int`; the function enforces this precondition with REQUIRES checks
+against `INT_MIN` and `INT_MAX` from `<limits.h>`.
+
+### Interactions
+
+| Parameter | Direction | Type    | Description                                               |
+| --------- | --------- | ------- | --------------------------------------------------------- |
+| input     | in        | int32_t | The fixed-width 32-bit signed integer value to convert.   |
+| return    | out       | int     | The input value as a platform-dependent int.              |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    int int_from_int32(int32_t input)
+    {
+        int result = 0;
+
+        REQUIRES(input >= INT_MIN, "input value is below the INT_MIN bound");
+        REQUIRES(input <= INT_MAX, "input value is above the INT_MAX bound");
+
+        result = input;
+
+        ENSURES(result == input, "Conversion did not preserve the integer value");
+
+        return(result);
+    }
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>
