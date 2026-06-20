@@ -1,0 +1,351 @@
+//<!DOCTYPE html><html><title>ASDFG-C Types Library Tests</title><xmp theme="united" style="display:none;">
+
+    // ---------------------------------------------------------------------------------
+    // asdfg-c-types - Integer type conversion helper tests
+    // ---------------------------------------------------------------------------------
+    // Tests for the primitive integer type conversion helper functions declared in
+    // asdfg-c-types.h, exercising int32_from_int and int_from_int32 across typical
+    // values, zero, negative values, and the bounds of the input type.
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+
+    #include <stdint.h>         // Fixed-width integer types (int32_t) and bounds (INT32_MIN, INT32_MAX)
+    #include <limits.h>         // Platform int bounds (INT_MIN, INT_MAX)
+    #include <stdlib.h>         // EXIT_SUCCESS and EXIT_FAILURE for the main return value
+    #include <stdbool.h>        // true, false
+
+    // Local includes
+    #include "asdfg-c-types.h"  // Declarations of int32_from_int and int_from_int32 under test
+    #include "asdfg-c-dbc.h"    // ASSERT contract macro used to verify test outcomes
+
+/*
+## Integer type conversion helper tests
+
+This file provides unit tests for the two conversion helper functions defined in
+`asdfg-c-types.html`: `int32_from_int` and `int_from_int32`. Each test exercises a
+single representative value and verifies that the conversion preserves it.
+
+The tests for `int32_from_int` call the function with a representative `int` value
+and assert that the returned `int32_t` holds the same value. Because `int32_t` and
+`int` have identical representations on the Linux target required by rule 11.1,
+integer constants such as `42` (which are of type `int`) are compared directly
+against `int32_t` results in the ASSERT conditions, following the same pattern used
+in the ENSURES check within the source functions under test.
+
+The tests for `int_from_int32` verify the round-trip property: an `int32_t` input
+converted to `int` by `int_from_int32` and immediately converted back to `int32_t`
+by `int32_from_int` must equal the original input. This approach avoids storing an
+`int` result in a local variable, which is not permitted by rules 6.17 and 6.18.
+
+Five tests are provided for each function, covering a typical positive value, zero,
+a typical negative value, the upper bound of the input type, and the lower bound.
+*/
+
+/*
+## int32_from_int test 1
+
+Tests that `int32_from_int` preserves a typical positive value. A value of 42 is
+chosen as a representative positive `int` that is well within the range of `int32_t`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int32_from_int_test_1(void)
+    {
+        int32_t result = 0;
+
+        result = int32_from_int(42);
+        ASSERT(42 == result, "Expected 42 to be preserved, got %d", result);
+    }
+
+/*
+## int32_from_int test 2
+
+Tests that `int32_from_int` preserves zero. Zero is the identity value for signed
+integers and must pass through the conversion unchanged.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int32_from_int_test_2(void)
+    {
+        int32_t result = 0;
+
+        result = int32_from_int(0);
+        ASSERT(0 == result, "Expected 0 to be preserved, got %d", result);
+    }
+
+/*
+## int32_from_int test 3
+
+Tests that `int32_from_int` preserves a typical negative value. A value of -1 is
+chosen as a representative negative `int` that is well within the range of `int32_t`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int32_from_int_test_3(void)
+    {
+        int32_t result = 0;
+
+        result = int32_from_int(-1);
+        ASSERT(-1 == result, "Expected -1 to be preserved, got %d", result);
+    }
+
+/*
+## int32_from_int test 4
+
+Tests that `int32_from_int` preserves `INT32_MAX`, the largest value representable
+in `int32_t`. On the Linux target required by rule 11.1, `INT32_MAX` equals `INT_MAX`,
+so this also exercises the upper bound of the REQUIRES precondition.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int32_from_int_test_4(void)
+    {
+        int32_t result = 0;
+
+        result = int32_from_int(INT32_MAX);
+        ASSERT(INT32_MAX == result, "Expected INT32_MAX to be preserved, got %d", result);
+    }
+
+/*
+## int32_from_int test 5
+
+Tests that `int32_from_int` preserves `INT32_MIN`, the smallest value representable
+in `int32_t`. On the Linux target required by rule 11.1, `INT32_MIN` equals `INT_MIN`,
+so this also exercises the lower bound of the REQUIRES precondition.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int32_from_int_test_5(void)
+    {
+        int32_t result = 0;
+
+        result = int32_from_int(INT32_MIN);
+        ASSERT(INT32_MIN == result, "Expected INT32_MIN to be preserved, got %d", result);
+    }
+
+/*
+## int_from_int32 test 1
+
+Tests that `int_from_int32` preserves a typical positive value. An `int32_t` input
+of 42 is converted to `int` by `int_from_int32` and immediately converted back to
+`int32_t` by `int32_from_int`; the final result must equal the original input of 42.
+
+The round-trip strategy is used because storing an `int` result in a local variable
+is not permitted by rules 6.17 and 6.18. The composition is a valid test because
+any error introduced by `int_from_int32` would propagate through `int32_from_int`
+and cause the final `int32_t` result to differ from the original input.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int_from_int32_test_1(void)
+    {
+        int32_t input_value = 42;
+        int32_t result = 0;
+
+        result = int32_from_int(int_from_int32(input_value));
+        ASSERT(42 == result, "Expected 42 to round-trip, got %d", result);
+    }
+
+/*
+## int_from_int32 test 2
+
+Tests that `int_from_int32` preserves zero. An `int32_t` input of 0 is converted
+to `int` and immediately converted back to `int32_t`; the result must equal 0.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int_from_int32_test_2(void)
+    {
+        int32_t input_value = 0;
+        int32_t result = 0;
+
+        result = int32_from_int(int_from_int32(input_value));
+        ASSERT(0 == result, "Expected 0 to round-trip, got %d", result);
+    }
+
+/*
+## int_from_int32 test 3
+
+Tests that `int_from_int32` preserves a typical negative value. An `int32_t` input
+of -1 is converted to `int` and immediately converted back to `int32_t`; the result
+must equal -1.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int_from_int32_test_3(void)
+    {
+        int32_t input_value = -1;
+        int32_t result = 0;
+
+        result = int32_from_int(int_from_int32(input_value));
+        ASSERT(-1 == result, "Expected -1 to round-trip, got %d", result);
+    }
+
+/*
+## int_from_int32 test 4
+
+Tests that `int_from_int32` preserves `INT32_MAX`. On the Linux target required by
+rule 11.1, `INT32_MAX` equals `INT_MAX`, so this also exercises the upper bound of
+the REQUIRES precondition in `int_from_int32`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int_from_int32_test_4(void)
+    {
+        int32_t input_value = INT32_MAX;
+        int32_t result = 0;
+
+        result = int32_from_int(int_from_int32(input_value));
+        ASSERT(INT32_MAX == result, "Expected INT32_MAX to round-trip, got %d", result);
+    }
+
+/*
+## int_from_int32 test 5
+
+Tests that `int_from_int32` preserves `INT32_MIN`. On the Linux target required by
+rule 11.1, `INT32_MIN` equals `INT_MIN`, so this also exercises the lower bound of
+the REQUIRES precondition in `int_from_int32`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int_from_int32_test_5(void)
+    {
+        int32_t input_value = INT32_MIN;
+        int32_t result = 0;
+
+        result = int32_from_int(int_from_int32(input_value));
+        ASSERT(INT32_MIN == result, "Expected INT32_MIN to round-trip, got %d", result);
+    }
+
+/*
+## main
+
+Runs all ten unit tests for `int32_from_int` and `int_from_int32` in function-number
+order. Each test calls ASSERT internally; `safety_abort` aborts the process if any
+assertion fails. A clean return of EXIT_SUCCESS therefore confirms that all ten
+assertions passed.
+
+### Interactions
+
+| Parameter | Direction | Type | Description                                                              |
+| --------- | --------- | ---- | ------------------------------------------------------------------------ |
+| return    | out       | int  | EXIT_SUCCESS when all assertions pass; aborts before returning on failure. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    int main(void)
+    {
+        int exit_code = EXIT_SUCCESS;
+
+        int32_from_int_test_1();
+        int32_from_int_test_2();
+        int32_from_int_test_3();
+        int32_from_int_test_4();
+        int32_from_int_test_5();
+
+        int_from_int32_test_1();
+        int_from_int32_test_2();
+        int_from_int32_test_3();
+        int_from_int32_test_4();
+        int_from_int32_test_5();
+
+        return(exit_code);
+    }
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>

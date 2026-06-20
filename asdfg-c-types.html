@@ -4,8 +4,8 @@
     // asdfg-c-types - Integer type conversion helpers
     // ---------------------------------------------------------------------------------
     // Implements the conversion helper functions declared in asdfg-c-types.h. These
-    // functions form the primitive layer of the conversion helper pattern (rule 6.35),
-    // bridging between the C standard types and the fixed-width stdint type.
+    // functions enable type conversion required by ASDFG-C rule 6.35, bridging between
+    // the C standard types and the fixed-width stdint type.
     // ---------------------------------------------------------------------------------
     // SPDX-FileCopyrightText: Copyright 2026 David Slik
     // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
@@ -36,11 +36,11 @@ target where `int` and `int32_t` have different widths.
 */
 
 /*
-## int32 from int
+## int32_t from int
 
 Converts a value of the platform-dependent C `int` type to the fixed-width
 `int32_t` type. The caller must ensure that the value is representable as a
-32-bit signed integer; the function enforces this precondition with REQUIRES
+32-bit signed integer. The function enforces this precondition with REQUIRES
 checks against `INT32_MIN` and `INT32_MAX` from `<stdint.h>`.
 
 ### Interactions
@@ -52,7 +52,8 @@ checks against `INT32_MIN` and `INT32_MAX` from `<stdint.h>`.
 
 Other changes to system state include:
 
-- None.
+- None
+
 */
 
     int32_t int32_from_int(int input)
@@ -70,11 +71,11 @@ Other changes to system state include:
     }
 
 /*
-## int from int32
+## int from int32_t
 
 Converts a value of the fixed-width `int32_t` type to the platform-dependent
 C `int` type. The caller must ensure that the value is representable as a
-platform `int`; the function enforces this precondition with REQUIRES checks
+platform `int`. The function enforces this precondition with REQUIRES checks
 against `INT_MIN` and `INT_MAX` from `<limits.h>`.
 
 ### Interactions
@@ -86,7 +87,8 @@ against `INT_MIN` and `INT_MAX` from `<limits.h>`.
 
 Other changes to system state include:
 
-- None.
+- None
+
 */
 
     int int_from_int32(int32_t input)
