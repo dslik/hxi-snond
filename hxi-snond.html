@@ -2037,6 +2037,8 @@ Other changes to system state include:
     {
         uint8_t     uuid_bytes[16] = {0};
         int32_t     urandom_fd = -1;
+        int64_t     read_size = 0;
+        int32_t     status = C_SUCCESS;
         
         REQUIRES(NULL != uuid_value, "NULL pointer passed for uuid_value");
 
@@ -2046,27 +2048,32 @@ Other changes to system state include:
         {
             fprintf(stderr, "Unable to open /dev/urandom for UUID generation\n");
             perror("/dev/urandom");
-            return(C_FAILURE);
+            status = C_FAILURE;
         }
-        
-        if((ssize_t) sizeof(uuid_bytes) != read(urandom_fd, uuid_bytes, sizeof(uuid_bytes)))
+        else
         {
-            fprintf(stderr, "Unable to read from /dev/urandom for UUID generation\n");
-            perror("/dev/urandom");
+            read_size = read(urandom_fd, uuid_bytes, sizeof(uuid_bytes));
+
+            if(read_size != int64_from_ssize(sizeof(uuid_bytes)))
+            {
+                fprintf(stderr, "Unable to read from /dev/urandom for UUID generation\n");
+                perror("/dev/urandom");
+                status = C_FAILURE;
+            }
+            else
+            {
+                uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x40U; // Version 4
+                uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80U; // Variant 1
+                
+                snprintf(uuid_value, C_UUID_LEN, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", uuid_bytes[0],  uuid_bytes[1],  uuid_bytes[2],  uuid_bytes[3], uuid_bytes[4],  uuid_bytes[5], uuid_bytes[6],  uuid_bytes[7], uuid_bytes[8],  uuid_bytes[9], uuid_bytes[10], uuid_bytes[11], uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]);
+            }
+        
             close(urandom_fd);
-            return(C_FAILURE);
         }
-        
-        close(urandom_fd);
-        
-        uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x40U; // Version 4
-        uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80U; // Variant 1
-        
-        snprintf(uuid_value, C_UUID_LEN, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", uuid_bytes[0],  uuid_bytes[1],  uuid_bytes[2],  uuid_bytes[3], uuid_bytes[4],  uuid_bytes[5], uuid_bytes[6],  uuid_bytes[7], uuid_bytes[8],  uuid_bytes[9], uuid_bytes[10], uuid_bytes[11], uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]);
         
         ENSURES(C_UUID_STRLEN == strlen(uuid_value), "Generated UUID has unexpected length %zu", strlen(uuid_value));
 
-        return(C_SUCCESS);
+        return(status);
     }
 
 /*

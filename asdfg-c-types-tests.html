@@ -4,29 +4,32 @@
     // asdfg-c-types - Integer type conversion helper tests
     // ---------------------------------------------------------------------------------
     // Tests for the primitive integer type conversion helper functions declared in
-    // asdfg-c-types.h, exercising int32_from_int and int_from_int32 across typical
-    // values, zero, negative values, and the bounds of the input type.
+    // asdfg-c-types.h, exercising int32_from_int, int_from_int32, int64_from_ssize,
+    // and ssize_from_int64 across typical values, zero, negative values, and the
+    // bounds of the input type.
     // ---------------------------------------------------------------------------------
     // SPDX-FileCopyrightText: Copyright 2026 David Slik
     // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
     // SPDX-License-Identifier: BSD-3-Clause
     // ---------------------------------------------------------------------------------
 
-    #include <stdint.h>         // Fixed-width integer types (int32_t) and bounds (INT32_MIN, INT32_MAX)
+    #include <stdint.h>         // Fixed-width integer types (int32_t, int64_t) and bounds (INT32_MIN, INT32_MAX, INT64_MIN, INT64_MAX)
     #include <limits.h>         // Platform int bounds (INT_MIN, INT_MAX)
+    #include <sys/types.h>      // POSIX ssize_t type, required by int64_from_ssize and ssize_from_int64
     #include <stdlib.h>         // EXIT_SUCCESS and EXIT_FAILURE for the main return value
     #include <stdbool.h>        // true, false
 
     // Local includes
-    #include "asdfg-c-types.h"  // Declarations of int32_from_int and int_from_int32 under test
+    #include "asdfg-c-types.h"  // Declarations of int32_from_int, int_from_int32, int64_from_ssize, and ssize_from_int64 under test
     #include "asdfg-c-dbc.h"    // ASSERT contract macro used to verify test outcomes
 
 /*
 ## Integer type conversion helper tests
 
-This file provides unit tests for the two conversion helper functions defined in
-`asdfg-c-types.html`: `int32_from_int` and `int_from_int32`. Each test exercises a
-single representative value and verifies that the conversion preserves it.
+This file provides unit tests for the four conversion helper functions defined in
+`asdfg-c-types.html`: `int32_from_int`, `int_from_int32`, `int64_from_ssize`, and
+`ssize_from_int64`. Each test exercises a single representative value and verifies
+that the conversion preserves it.
 
 The tests for `int32_from_int` call the function with a representative `int` value
 and assert that the returned `int32_t` holds the same value. Because `int32_t` and
@@ -40,8 +43,22 @@ converted to `int` by `int_from_int32` and immediately converted back to `int32_
 by `int32_from_int` must equal the original input. This approach avoids storing an
 `int` result in a local variable, which is not permitted by rules 6.17 and 6.18.
 
+The tests for `int64_from_ssize` call the function with a representative value and
+assert that the returned `int64_t` holds the same value. On the Linux target required
+by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types with identical
+value ranges, so integer constants such as `42` (which are of type `int`) are
+implicitly widened to `ssize_t` by the function call without loss of value, and
+`INT64_MAX` and `INT64_MIN` exercise the full extent of the shared range.
+
+The tests for `ssize_from_int64` verify the round-trip property: an `int64_t`
+input converted to `ssize_t` by `ssize_from_int64` and immediately converted back
+to `int64_t` by `int64_from_ssize` must equal the original input. This approach
+avoids storing a `ssize_t` result in a local variable, which is inadvisable per
+rule 6.19.
+
 Five tests are provided for each function, covering a typical positive value, zero,
-a typical negative value, the upper bound of the input type, and the lower bound.
+a typical negative value, the upper bound of the shared type range, and the lower
+bound.
 */
 
 /*
@@ -311,12 +328,287 @@ Other changes to system state include:
     }
 
 /*
+## int64_from_ssize test 1
+
+Tests that `int64_from_ssize` preserves a typical positive value. A value of 42
+is chosen as a representative positive value well within the range shared by
+`ssize_t` and `int64_t`. The integer constant `42` is of type `int` and is
+implicitly widened to `ssize_t` by the function call, following the same pattern
+used in the `int32_from_int` tests.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_ssize_test_1(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_ssize(42);
+        ASSERT(42 == result, "Expected 42 to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_ssize test 2
+
+Tests that `int64_from_ssize` preserves zero. Zero is the identity value for
+signed integers and must pass through the conversion unchanged.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_ssize_test_2(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_ssize(0);
+        ASSERT(0 == result, "Expected 0 to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_ssize test 3
+
+Tests that `int64_from_ssize` preserves a typical negative value. A value of
+-1 is chosen as a representative negative value well within the range shared
+by `ssize_t` and `int64_t`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_ssize_test_3(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_ssize(-1);
+        ASSERT(-1 == result, "Expected -1 to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_ssize test 4
+
+Tests that `int64_from_ssize` preserves `INT64_MAX`, the largest value
+representable in `int64_t`. On the Linux target required by rule 11.1, `ssize_t`
+and `int64_t` are both 64-bit signed types with identical value ranges, so
+`INT64_MAX` is also the upper bound of the `ssize_t` range.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_ssize_test_4(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_ssize(INT64_MAX);
+        ASSERT(INT64_MAX == result, "Expected INT64_MAX to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_ssize test 5
+
+Tests that `int64_from_ssize` preserves `INT64_MIN`, the smallest value
+representable in `int64_t`. On the Linux target required by rule 11.1, `ssize_t`
+and `int64_t` are both 64-bit signed types with identical value ranges, so
+`INT64_MIN` is also the lower bound of the `ssize_t` range.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_ssize_test_5(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_ssize(INT64_MIN);
+        ASSERT(INT64_MIN == result, "Expected INT64_MIN to be preserved, got %ld", result);
+    }
+
+/*
+## ssize_from_int64 test 1
+
+Tests that `ssize_from_int64` preserves a typical positive value. An `int64_t`
+input of 42 is converted to `ssize_t` by `ssize_from_int64` and immediately
+converted back to `int64_t` by `int64_from_ssize`; the final result must equal
+the original input of 42.
+
+The round-trip strategy is used because storing a `ssize_t` result in a local
+variable is inadvisable per rule 6.19. The composition is a valid test because
+any error introduced by `ssize_from_int64` would propagate through
+`int64_from_ssize` and cause the final `int64_t` result to differ from the
+original input.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void ssize_from_int64_test_1(void)
+    {
+        int64_t input_value = 42;
+        int64_t result = 0;
+
+        result = int64_from_ssize(ssize_from_int64(input_value));
+        ASSERT(42 == result, "Expected 42 to round-trip, got %ld", result);
+    }
+
+/*
+## ssize_from_int64 test 2
+
+Tests that `ssize_from_int64` preserves zero. An `int64_t` input of 0 is
+converted to `ssize_t` and immediately converted back to `int64_t`; the result
+must equal 0.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void ssize_from_int64_test_2(void)
+    {
+        int64_t input_value = 0;
+        int64_t result = 0;
+
+        result = int64_from_ssize(ssize_from_int64(input_value));
+        ASSERT(0 == result, "Expected 0 to round-trip, got %ld", result);
+    }
+
+/*
+## ssize_from_int64 test 3
+
+Tests that `ssize_from_int64` preserves a typical negative value. An `int64_t`
+input of -1 is converted to `ssize_t` and immediately converted back to
+`int64_t`; the result must equal -1.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void ssize_from_int64_test_3(void)
+    {
+        int64_t input_value = -1;
+        int64_t result = 0;
+
+        result = int64_from_ssize(ssize_from_int64(input_value));
+        ASSERT(-1 == result, "Expected -1 to round-trip, got %ld", result);
+    }
+
+/*
+## ssize_from_int64 test 4
+
+Tests that `ssize_from_int64` preserves `INT64_MAX`. On the Linux target
+required by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types
+with identical value ranges, so the round-trip must preserve `INT64_MAX` exactly.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void ssize_from_int64_test_4(void)
+    {
+        int64_t input_value = INT64_MAX;
+        int64_t result = 0;
+
+        result = int64_from_ssize(ssize_from_int64(input_value));
+        ASSERT(INT64_MAX == result, "Expected INT64_MAX to round-trip, got %ld", result);
+    }
+
+/*
+## ssize_from_int64 test 5
+
+Tests that `ssize_from_int64` preserves `INT64_MIN`. On the Linux target
+required by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types
+with identical value ranges, so the round-trip must preserve `INT64_MIN` exactly.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void ssize_from_int64_test_5(void)
+    {
+        int64_t input_value = INT64_MIN;
+        int64_t result = 0;
+
+        result = int64_from_ssize(ssize_from_int64(input_value));
+        ASSERT(INT64_MIN == result, "Expected INT64_MIN to round-trip, got %ld", result);
+    }
+
+/*
 ## main
 
-Runs all ten unit tests for `int32_from_int` and `int_from_int32` in function-number
-order. Each test calls ASSERT internally; `safety_abort` aborts the process if any
-assertion fails. A clean return of EXIT_SUCCESS therefore confirms that all ten
-assertions passed.
+Runs all twenty unit tests for `int32_from_int`, `int_from_int32`,
+`int64_from_ssize`, and `ssize_from_int64` in function-number order. Each test
+calls ASSERT internally; `safety_abort` aborts the process if any assertion fails.
+A clean return of EXIT_SUCCESS therefore confirms that all twenty assertions passed.
 
 ### Interactions
 
@@ -344,6 +636,18 @@ Other changes to system state include:
         int_from_int32_test_3();
         int_from_int32_test_4();
         int_from_int32_test_5();
+
+        int64_from_ssize_test_1();
+        int64_from_ssize_test_2();
+        int64_from_ssize_test_3();
+        int64_from_ssize_test_4();
+        int64_from_ssize_test_5();
+
+        ssize_from_int64_test_1();
+        ssize_from_int64_test_2();
+        ssize_from_int64_test_3();
+        ssize_from_int64_test_4();
+        ssize_from_int64_test_5();
 
         return(exit_code);
     }
