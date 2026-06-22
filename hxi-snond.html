@@ -2201,6 +2201,7 @@ Other changes to system state include:
 
 */
 
+    // ASDFG-C 6.18 VIOLATION: POSIX sigaction handler signature requires int signum; no fixed-width alternative
     static void signal_handler(int signum)
     {
         struct sigaction    signal_action = {0};

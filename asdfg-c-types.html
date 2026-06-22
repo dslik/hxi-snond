@@ -17,7 +17,7 @@
     #include <stdbool.h>        // true, false
 
     // Local includes
-    #include "asdfg-c-types.h"  // Declarations of int32_from_int and int_from_int32
+    #include "asdfg-c-types.h"  // Declarations of type conversion helper functions
     #include "asdfg-c-dbc.h"    // REQUIRES, ENSURES, and ASSERT contract macros
 
 /*
@@ -156,6 +156,70 @@ Other changes to system state include:
     ssize_t ssize_from_int64(int64_t input)
     {
         ssize_t result = 0;
+
+        result = input;
+
+        ENSURES(result == input, "Conversion did not preserve the integer value");
+
+        return(result);
+    }
+
+/*
+## int64_t from time_t
+
+Converts a value of the POSIX-defined `time_t` type to the fixed-width
+`int64_t` type. On the Linux target required by rule 11.1, `time_t` is a
+64-bit signed type, so every `time_t` value is representable as `int64_t`
+and no REQUIRES precondition check is required.
+
+### Interactions
+
+| Parameter | Direction | Type    | Description                                               |
+| --------- | --------- | ------- | --------------------------------------------------------- |
+| input     | in        | time_t  | The POSIX-defined calendar time value to convert.         |
+| return    | out       | int64_t | The input value as a fixed-width 64-bit signed integer.   |
+
+Other changes to system state include:
+
+- None
+
+*/
+
+    int64_t int64_from_time(time_t input)
+    {
+        int64_t result = 0;
+
+        result = input;
+
+        ENSURES(result == input, "Conversion did not preserve the integer value");
+
+        return(result);
+    }
+
+/*
+## time_t from int64_t
+
+Converts a value of the fixed-width `int64_t` type to the POSIX-defined
+`time_t` type. On the Linux target required by rule 11.1, `time_t` is a
+64-bit signed type, so every `int64_t` value is representable as `time_t`
+and no REQUIRES precondition check is required.
+
+### Interactions
+
+| Parameter | Direction | Type    | Description                                               |
+| --------- | --------- | ------- | --------------------------------------------------------- |
+| input     | in        | int64_t | The fixed-width 64-bit signed integer value to convert.   |
+| return    | out       | time_t  | The input value as a POSIX-defined time_t.                |
+
+Other changes to system state include:
+
+- None
+
+*/
+
+    time_t time_from_int64(int64_t input)
+    {
+        time_t result = 0;
 
         result = input;
 

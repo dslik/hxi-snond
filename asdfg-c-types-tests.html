@@ -26,46 +26,23 @@
 /*
 ## Integer type conversion helper tests
 
-This file provides unit tests for the four conversion helper functions defined in
-`asdfg-c-types.html`: `int32_from_int`, `int_from_int32`, `int64_from_ssize`, and
-`ssize_from_int64`. Each test exercises a single representative value and verifies
-that the conversion preserves it.
+This file provides unit tests for the four conversion helper functions defined in `asdfg-c-types.html`: `int32_from_int`, `int_from_int32`, `int64_from_ssize`, and `ssize_from_int64`. Each test exercises a single representative value and verifies that the conversion preserves it.
 
-The tests for `int32_from_int` call the function with a representative `int` value
-and assert that the returned `int32_t` holds the same value. Because `int32_t` and
-`int` have identical representations on the Linux target required by rule 11.1,
-integer constants such as `42` (which are of type `int`) are compared directly
-against `int32_t` results in the ASSERT conditions, following the same pattern used
-in the ENSURES check within the source functions under test.
+The tests for `int32_from_int` call the function with a representative `int` value and assert that the returned `int32_t` holds the same value. Because `int32_t` and `int` have identical representations on the Linux target required by rule 11.1, integer constants such as `42` (which are of type `int`) are compared directly against `int32_t` results in the ASSERT conditions, following the same pattern used in the ENSURES check within the source functions under test.
 
-The tests for `int_from_int32` verify the round-trip property: an `int32_t` input
-converted to `int` by `int_from_int32` and immediately converted back to `int32_t`
-by `int32_from_int` must equal the original input. This approach avoids storing an
-`int` result in a local variable, which is not permitted by rules 6.17 and 6.18.
+The tests for `int_from_int32` verify the round-trip property: an `int32_t` input converted to `int` by `int_from_int32` and immediately converted back to `int32_t` by `int32_from_int` must equal the original input. This approach avoids storing an `int` result in a local variable, which is not permitted by rules 6.17 and 6.18.
 
-The tests for `int64_from_ssize` call the function with a representative value and
-assert that the returned `int64_t` holds the same value. On the Linux target required
-by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types with identical
-value ranges, so integer constants such as `42` (which are of type `int`) are
-implicitly widened to `ssize_t` by the function call without loss of value, and
-`INT64_MAX` and `INT64_MIN` exercise the full extent of the shared range.
+The tests for `int64_from_ssize` call the function with a representative value and assert that the returned `int64_t` holds the same value. On the Linux target required by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types with identical value ranges, so integer constants such as `42` (which are of type `int`) are implicitly widened to `ssize_t` by the function call without loss of value, and `INT64_MAX` and `INT64_MIN` exercise the full extent of the shared range.
 
-The tests for `ssize_from_int64` verify the round-trip property: an `int64_t`
-input converted to `ssize_t` by `ssize_from_int64` and immediately converted back
-to `int64_t` by `int64_from_ssize` must equal the original input. This approach
-avoids storing a `ssize_t` result in a local variable, which is inadvisable per
-rule 6.19.
+The tests for `ssize_from_int64` verify the round-trip property: an `int64_t` input converted to `ssize_t` by `ssize_from_int64` and immediately converted back to `int64_t` by `int64_from_ssize` must equal the original input. This approach avoids storing a `ssize_t` result in a local variable, which is inadvisable per rule 6.19.
 
-Five tests are provided for each function, covering a typical positive value, zero,
-a typical negative value, the upper bound of the shared type range, and the lower
-bound.
+Five tests are provided for each function, covering a typical positive value, zero, a typical negative value, the upper bound of the shared type range, and the lower bound.
 */
 
 /*
 ## int32_from_int test 1
 
-Tests that `int32_from_int` preserves a typical positive value. A value of 42 is
-chosen as a representative positive `int` that is well within the range of `int32_t`.
+Tests that `int32_from_int` preserves a typical positive value. A value of 42 is chosen as a representative positive `int` that is well within the range of `int32_t`.
 
 ### Interactions
 
@@ -89,8 +66,7 @@ Other changes to system state include:
 /*
 ## int32_from_int test 2
 
-Tests that `int32_from_int` preserves zero. Zero is the identity value for signed
-integers and must pass through the conversion unchanged.
+Tests that `int32_from_int` preserves zero. Zero is the identity value for signed integers and must pass through the conversion unchanged.
 
 ### Interactions
 
@@ -114,8 +90,7 @@ Other changes to system state include:
 /*
 ## int32_from_int test 3
 
-Tests that `int32_from_int` preserves a typical negative value. A value of -1 is
-chosen as a representative negative `int` that is well within the range of `int32_t`.
+Tests that `int32_from_int` preserves a typical negative value. A value of -1 is chosen as a representative negative `int` that is well within the range of `int32_t`.
 
 ### Interactions
 
@@ -139,9 +114,7 @@ Other changes to system state include:
 /*
 ## int32_from_int test 4
 
-Tests that `int32_from_int` preserves `INT32_MAX`, the largest value representable
-in `int32_t`. On the Linux target required by rule 11.1, `INT32_MAX` equals `INT_MAX`,
-so this also exercises the upper bound of the REQUIRES precondition.
+Tests that `int32_from_int` preserves `INT32_MAX`, the largest value representable in `int32_t`. On the Linux target required by rule 11.1, `INT32_MAX` equals `INT_MAX`, so this also exercises the upper bound of the REQUIRES precondition.
 
 ### Interactions
 
@@ -165,9 +138,7 @@ Other changes to system state include:
 /*
 ## int32_from_int test 5
 
-Tests that `int32_from_int` preserves `INT32_MIN`, the smallest value representable
-in `int32_t`. On the Linux target required by rule 11.1, `INT32_MIN` equals `INT_MIN`,
-so this also exercises the lower bound of the REQUIRES precondition.
+Tests that `int32_from_int` preserves `INT32_MIN`, the smallest value representable in `int32_t`. On the Linux target required by rule 11.1, `INT32_MIN` equals `INT_MIN`, so this also exercises the lower bound of the REQUIRES precondition.
 
 ### Interactions
 
@@ -191,14 +162,9 @@ Other changes to system state include:
 /*
 ## int_from_int32 test 1
 
-Tests that `int_from_int32` preserves a typical positive value. An `int32_t` input
-of 42 is converted to `int` by `int_from_int32` and immediately converted back to
-`int32_t` by `int32_from_int`; the final result must equal the original input of 42.
+Tests that `int_from_int32` preserves a typical positive value. An `int32_t` input of 42 is converted to `int` by `int_from_int32` and immediately converted back to `int32_t` by `int32_from_int`; the final result must equal the original input of 42.
 
-The round-trip strategy is used because storing an `int` result in a local variable
-is not permitted by rules 6.17 and 6.18. The composition is a valid test because
-any error introduced by `int_from_int32` would propagate through `int32_from_int`
-and cause the final `int32_t` result to differ from the original input.
+The round-trip strategy is used because storing an `int` result in a local variable is not permitted by rules 6.17 and 6.18. The composition is a valid test because any error introduced by `int_from_int32` would propagate through `int32_from_int` and cause the final `int32_t` result to differ from the original input.
 
 ### Interactions
 
@@ -223,8 +189,7 @@ Other changes to system state include:
 /*
 ## int_from_int32 test 2
 
-Tests that `int_from_int32` preserves zero. An `int32_t` input of 0 is converted
-to `int` and immediately converted back to `int32_t`; the result must equal 0.
+Tests that `int_from_int32` preserves zero. An `int32_t` input of 0 is converted to `int` and immediately converted back to `int32_t`. The result must equal 0.
 
 ### Interactions
 
@@ -249,9 +214,7 @@ Other changes to system state include:
 /*
 ## int_from_int32 test 3
 
-Tests that `int_from_int32` preserves a typical negative value. An `int32_t` input
-of -1 is converted to `int` and immediately converted back to `int32_t`; the result
-must equal -1.
+Tests that `int_from_int32` preserves a typical negative value. An `int32_t` input of -1 is converted to `int` and immediately converted back to `int32_t`. The result must equal -1.
 
 ### Interactions
 
@@ -276,9 +239,7 @@ Other changes to system state include:
 /*
 ## int_from_int32 test 4
 
-Tests that `int_from_int32` preserves `INT32_MAX`. On the Linux target required by
-rule 11.1, `INT32_MAX` equals `INT_MAX`, so this also exercises the upper bound of
-the REQUIRES precondition in `int_from_int32`.
+Tests that `int_from_int32` preserves `INT32_MAX`. On the Linux target required by rule 11.1, `INT32_MAX` equals `INT_MAX`, so this also exercises the upper bound of the REQUIRES precondition in `int_from_int32`.
 
 ### Interactions
 
@@ -303,9 +264,7 @@ Other changes to system state include:
 /*
 ## int_from_int32 test 5
 
-Tests that `int_from_int32` preserves `INT32_MIN`. On the Linux target required by
-rule 11.1, `INT32_MIN` equals `INT_MIN`, so this also exercises the lower bound of
-the REQUIRES precondition in `int_from_int32`.
+Tests that `int_from_int32` preserves `INT32_MIN`. On the Linux target required by rule 11.1, `INT32_MIN` equals `INT_MIN`, so this also exercises the lower bound of the REQUIRES precondition in `int_from_int32`.
 
 ### Interactions
 
@@ -330,11 +289,7 @@ Other changes to system state include:
 /*
 ## int64_from_ssize test 1
 
-Tests that `int64_from_ssize` preserves a typical positive value. A value of 42
-is chosen as a representative positive value well within the range shared by
-`ssize_t` and `int64_t`. The integer constant `42` is of type `int` and is
-implicitly widened to `ssize_t` by the function call, following the same pattern
-used in the `int32_from_int` tests.
+Tests that `int64_from_ssize` preserves a typical positive value. A value of 42 is chosen as a representative positive value well within the range shared by `ssize_t` and `int64_t`. The integer constant `42` is of type `int` and is implicitly widened to `ssize_t` by the function call, following the same pattern used in the `int32_from_int` tests.
 
 ### Interactions
 
@@ -358,8 +313,7 @@ Other changes to system state include:
 /*
 ## int64_from_ssize test 2
 
-Tests that `int64_from_ssize` preserves zero. Zero is the identity value for
-signed integers and must pass through the conversion unchanged.
+Tests that `int64_from_ssize` preserves zero. Zero is the identity value for signed integers and must pass through the conversion unchanged.
 
 ### Interactions
 
@@ -383,9 +337,7 @@ Other changes to system state include:
 /*
 ## int64_from_ssize test 3
 
-Tests that `int64_from_ssize` preserves a typical negative value. A value of
--1 is chosen as a representative negative value well within the range shared
-by `ssize_t` and `int64_t`.
+Tests that `int64_from_ssize` preserves a typical negative value. A value of -1 is chosen as a representative negative value well within the range shared by `ssize_t` and `int64_t`.
 
 ### Interactions
 
@@ -409,10 +361,7 @@ Other changes to system state include:
 /*
 ## int64_from_ssize test 4
 
-Tests that `int64_from_ssize` preserves `INT64_MAX`, the largest value
-representable in `int64_t`. On the Linux target required by rule 11.1, `ssize_t`
-and `int64_t` are both 64-bit signed types with identical value ranges, so
-`INT64_MAX` is also the upper bound of the `ssize_t` range.
+Tests that `int64_from_ssize` preserves `INT64_MAX`, the largest value representable in `int64_t`. On the Linux target required by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types with identical value ranges, so `INT64_MAX` is also the upper bound of the `ssize_t` range.
 
 ### Interactions
 
@@ -436,10 +385,7 @@ Other changes to system state include:
 /*
 ## int64_from_ssize test 5
 
-Tests that `int64_from_ssize` preserves `INT64_MIN`, the smallest value
-representable in `int64_t`. On the Linux target required by rule 11.1, `ssize_t`
-and `int64_t` are both 64-bit signed types with identical value ranges, so
-`INT64_MIN` is also the lower bound of the `ssize_t` range.
+Tests that `int64_from_ssize` preserves `INT64_MIN`, the smallest value representable in `int64_t`. On the Linux target required by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types with identical value ranges, so `INT64_MIN` is also the lower bound of the `ssize_t` range.
 
 ### Interactions
 
@@ -463,16 +409,9 @@ Other changes to system state include:
 /*
 ## ssize_from_int64 test 1
 
-Tests that `ssize_from_int64` preserves a typical positive value. An `int64_t`
-input of 42 is converted to `ssize_t` by `ssize_from_int64` and immediately
-converted back to `int64_t` by `int64_from_ssize`; the final result must equal
-the original input of 42.
+Tests that `ssize_from_int64` preserves a typical positive value. An `int64_t` input of 42 is converted to `ssize_t` by `ssize_from_int64` and immediately converted back to `int64_t` by `int64_from_ssize`; the final result must equal the original input of 42.
 
-The round-trip strategy is used because storing a `ssize_t` result in a local
-variable is inadvisable per rule 6.19. The composition is a valid test because
-any error introduced by `ssize_from_int64` would propagate through
-`int64_from_ssize` and cause the final `int64_t` result to differ from the
-original input.
+The round-trip strategy is used because storing a `ssize_t` result in a local variable is inadvisable per rule 6.19. The composition is a valid test because any error introduced by `ssize_from_int64` would propagate through `int64_from_ssize` and cause the final `int64_t` result to differ from the original input.
 
 ### Interactions
 
@@ -497,9 +436,7 @@ Other changes to system state include:
 /*
 ## ssize_from_int64 test 2
 
-Tests that `ssize_from_int64` preserves zero. An `int64_t` input of 0 is
-converted to `ssize_t` and immediately converted back to `int64_t`; the result
-must equal 0.
+Tests that `ssize_from_int64` preserves zero. An `int64_t` input of 0 is converted to `ssize_t` and immediately converted back to `int64_t`. The result must equal 0.
 
 ### Interactions
 
@@ -524,9 +461,7 @@ Other changes to system state include:
 /*
 ## ssize_from_int64 test 3
 
-Tests that `ssize_from_int64` preserves a typical negative value. An `int64_t`
-input of -1 is converted to `ssize_t` and immediately converted back to
-`int64_t`; the result must equal -1.
+Tests that `ssize_from_int64` preserves a typical negative value. An `int64_t` input of -1 is converted to `ssize_t` and immediately converted back to `int64_t`. The result must equal -1.
 
 ### Interactions
 
@@ -551,9 +486,7 @@ Other changes to system state include:
 /*
 ## ssize_from_int64 test 4
 
-Tests that `ssize_from_int64` preserves `INT64_MAX`. On the Linux target
-required by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types
-with identical value ranges, so the round-trip must preserve `INT64_MAX` exactly.
+Tests that `ssize_from_int64` preserves `INT64_MAX`. On the Linux target required by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types with identical value ranges, so the round-trip must preserve `INT64_MAX` exactly.
 
 ### Interactions
 
@@ -578,9 +511,7 @@ Other changes to system state include:
 /*
 ## ssize_from_int64 test 5
 
-Tests that `ssize_from_int64` preserves `INT64_MIN`. On the Linux target
-required by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types
-with identical value ranges, so the round-trip must preserve `INT64_MIN` exactly.
+Tests that `ssize_from_int64` preserves `INT64_MIN`. On the Linux target required by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types with identical value ranges, so the round-trip must preserve `INT64_MIN` exactly.
 
 ### Interactions
 
@@ -603,12 +534,257 @@ Other changes to system state include:
     }
 
 /*
+## int64_from_time test 1
+
+Tests that `int64_from_time` preserves a typical positive value. A value of 42 is chosen as a representative positive value well within the range shared by `time_t` and `int64_t`. The integer constant `42` is of type `int` and is implicitly widened to `time_t` by the function call, following the same pattern used in the `int32_from_int` tests.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_time_test_1(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_time(42);
+        ASSERT(42 == result, "Expected 42 to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_time test 2
+
+Tests that `int64_from_time` preserves zero. Zero is the identity value for signed integers and must pass through the conversion unchanged.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_time_test_2(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_time(0);
+        ASSERT(0 == result, "Expected 0 to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_time test 3
+
+Tests that `int64_from_time` preserves a typical negative value. A value of -1 is chosen as a representative negative value well within the range shared by `time_t` and `int64_t`. Negative `time_t` values represent instants before the Unix epoch of 1970-01-01T00:00:00Z.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_time_test_3(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_time(-1);
+        ASSERT(-1 == result, "Expected -1 to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_time test 4
+
+Tests that `int64_from_time` preserves `INT64_MAX`, the largest value representable in `int64_t`. On the Linux target required by rule 11.1, `time_t` and `int64_t` are both 64-bit signed types with identical value ranges, so `INT64_MAX` is also the upper bound of the `time_t` range.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_time_test_4(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_time(INT64_MAX);
+        ASSERT(INT64_MAX == result, "Expected INT64_MAX to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_time test 5
+
+Tests that `int64_from_time` preserves `INT64_MIN`, the smallest value representable in `int64_t`. On the Linux target required by rule 11.1, `time_t` and `int64_t` are both 64-bit signed types with identical value ranges, so `INT64_MIN` is also the lower bound of the `time_t` range.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_time_test_5(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_time(INT64_MIN);
+        ASSERT(INT64_MIN == result, "Expected INT64_MIN to be preserved, got %ld", result);
+    }
+
+/*
+## time_from_int64 test 1
+
+Tests that `time_from_int64` preserves a typical positive value. An `int64_t` input of 42 is converted to `time_t` by `time_from_int64` and immediately converted back to `int64_t` by `int64_from_time`; the final result must equal the original input of 42.
+
+The round-trip strategy is used because storing a `time_t` result in a local variable is inadvisable per rule 6.19. The composition is a valid test because any error introduced by `time_from_int64` would propagate through `int64_from_time` and cause the final `int64_t` result to differ from the original input.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void time_from_int64_test_1(void)
+    {
+        int64_t input_value = 42;
+        int64_t result = 0;
+
+        result = int64_from_time(time_from_int64(input_value));
+        ASSERT(42 == result, "Expected 42 to round-trip, got %ld", result);
+    }
+
+/*
+## time_from_int64 test 2
+
+Tests that `time_from_int64` preserves zero. An `int64_t` input of 0 is converted to `time_t` and immediately converted back to `int64_t`. The result must equal 0.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void time_from_int64_test_2(void)
+    {
+        int64_t input_value = 0;
+        int64_t result = 0;
+
+        result = int64_from_time(time_from_int64(input_value));
+        ASSERT(0 == result, "Expected 0 to round-trip, got %ld", result);
+    }
+
+/*
+## time_from_int64 test 3
+
+Tests that `time_from_int64` preserves a typical negative value. An `int64_t` input of -1 is converted to `time_t` and immediately converted back to `int64_t` The result must equal -1.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void time_from_int64_test_3(void)
+    {
+        int64_t input_value = -1;
+        int64_t result = 0;
+
+        result = int64_from_time(time_from_int64(input_value));
+        ASSERT(-1 == result, "Expected -1 to round-trip, got %ld", result);
+    }
+
+/*
+## time_from_int64 test 4
+
+Tests that `time_from_int64` preserves `INT64_MAX`. On the Linux target required by rule 11.1, `time_t` and `int64_t` are both 64-bit signed types with identical value ranges, so the round-trip must preserve `INT64_MAX` exactly.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void time_from_int64_test_4(void)
+    {
+        int64_t input_value = INT64_MAX;
+        int64_t result = 0;
+
+        result = int64_from_time(time_from_int64(input_value));
+        ASSERT(INT64_MAX == result, "Expected INT64_MAX to round-trip, got %ld", result);
+    }
+
+/*
+## time_from_int64 test 5
+
+Tests that `time_from_int64` preserves `INT64_MIN`. On the Linux target required by rule 11.1, `time_t` and `int64_t` are both 64-bit signed types with identical value ranges, so the round-trip must preserve `INT64_MIN` exactly.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void time_from_int64_test_5(void)
+    {
+        int64_t input_value = INT64_MIN;
+        int64_t result = 0;
+
+        result = int64_from_time(time_from_int64(input_value));
+        ASSERT(INT64_MIN == result, "Expected INT64_MIN to round-trip, got %ld", result);
+    }
+
+/*
 ## main
 
-Runs all twenty unit tests for `int32_from_int`, `int_from_int32`,
-`int64_from_ssize`, and `ssize_from_int64` in function-number order. Each test
-calls ASSERT internally; `safety_abort` aborts the process if any assertion fails.
-A clean return of EXIT_SUCCESS therefore confirms that all twenty assertions passed.
+Runs all thirty unit tests for `int32_from_int`, `int_from_int32`, `int64_from_ssize`, `ssize_from_int64`, `int64_from_time`, and
+`time_from_int64` in function-number order. Each test calls ASSERT internally; `safety_abort` aborts the process if any assertion fails. A clean return of EXIT_SUCCESS therefore confirms that all twenty assertions passed.
 
 ### Interactions
 
@@ -648,6 +824,18 @@ Other changes to system state include:
         ssize_from_int64_test_3();
         ssize_from_int64_test_4();
         ssize_from_int64_test_5();
+
+        int64_from_time_test_1();
+        int64_from_time_test_2();
+        int64_from_time_test_3();
+        int64_from_time_test_4();
+        int64_from_time_test_5();
+
+        time_from_int64_test_1();
+        time_from_int64_test_2();
+        time_from_int64_test_3();
+        time_from_int64_test_4();
+        time_from_int64_test_5();
 
         return(exit_code);
     }
