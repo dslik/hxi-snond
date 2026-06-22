@@ -5,15 +5,15 @@
     // ---------------------------------------------------------------------------------
     // Implements the conversion helper functions declared in asdfg-c-types.h. These
     // functions enable type conversion required by ASDFG-C rule 6.35, bridging between
-    // the C standard types and the fixed-width stdint type.
+    // the C standard types, POSIX types, and the fixed-width stdint types.
     // ---------------------------------------------------------------------------------
     // SPDX-FileCopyrightText: Copyright 2026 David Slik
     // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
     // SPDX-License-Identifier: BSD-3-Clause
     // ---------------------------------------------------------------------------------
 
-    #include <stdint.h>         // Fixed-width integer types (int32_t) and bounds (INT32_MIN, INT32_MAX)
-    #include <limits.h>         // Platform int bounds (INT_MIN, INT_MAX)
+    #include <stdint.h>         // Fixed-width integer types (int32_t, int64_t) and bounds (INT32_MIN, INT32_MAX, etc.)
+    #include <limits.h>         // Platform bounds (INT_MIN, INT_MAX, etc.)
     #include <stdbool.h>        // true, false
 
     // Local includes
@@ -23,25 +23,15 @@
 /*
 ## Integer type conversion helpers
 
-This file implements primitive conversion helper functions declared in
-`asdfg-c-types.h`. They form the lowest layer of the conversion helper pattern
-required by rule 6.35, bridging between the C standard type (whose width
-is platform-defined) and the fixed-width types from `<stdint.h>`.
+This file implements primitive conversion helper functions declared in `asdfg-c-types.h`. They form the lowest layer of the conversion helper pattern required by rule 6.35, bridging between the C standard types (whose widths are platform-defined), POSIX types, and the fixed-width types from `<stdint.h>`.
 
-On the Linux target required by rule 11.1, `int` and `int32_t` are both 32-bit
-signed types with identical value ranges, so the REQUIRES range checks in each
-function are always satisfied on that target. The checks are retained to make
-the valid input range explicit and to keep the functions portable to any future
-target where `int` and `int32_t` have different widths.
+On the Linux target required by rule 11.1, `int` and `int32_t` are both 32-bit signed types with identical value ranges, and `long` and `int64_t` are both 64-bit signed types with identical value ranges. The REQUIRES range checks in `int32_from_int`, `int_from_int32`, `int64_from_long`, and `long_from_int64` are therefore always satisfied on that target. The checks are retained to make the valid input ranges explicit and to keep the functions portable to any future target where these type pairs have different widths.
 */
 
 /*
 ## int32_t from int
 
-Converts a value of the platform-dependent C `int` type to the fixed-width
-`int32_t` type. The caller must ensure that the value is representable as a
-32-bit signed integer. The function enforces this precondition with REQUIRES
-checks against `INT32_MIN` and `INT32_MAX` from `<stdint.h>`.
+Converts a value of the platform-dependent C `int` type to the fixed-width `int32_t` type. The caller must ensure that the value is representable as a 32-bit signed integer. The function enforces this precondition with REQUIRES checks against `INT32_MIN` and `INT32_MAX` from `<stdint.h>`.
 
 ### Interactions
 
@@ -73,10 +63,7 @@ Other changes to system state include:
 /*
 ## int from int32_t
 
-Converts a value of the fixed-width `int32_t` type to the platform-dependent
-C `int` type. The caller must ensure that the value is representable as a
-platform `int`. The function enforces this precondition with REQUIRES checks
-against `INT_MIN` and `INT_MAX` from `<limits.h>`.
+Converts a value of the fixed-width `int32_t` type to the platform-dependent C `int` type. The caller must ensure that the value is representable as a platform `int`. The function enforces this precondition with REQUIRES checks against `INT_MIN` and `INT_MAX` from `<limits.h>`.
 
 ### Interactions
 
@@ -220,6 +207,74 @@ Other changes to system state include:
     time_t time_from_int64(int64_t input)
     {
         time_t result = 0;
+
+        result = input;
+
+        ENSURES(result == input, "Conversion did not preserve the integer value");
+
+        return(result);
+    }
+
+/*
+## int64_t from long
+
+Converts a value of the platform-dependent C `long` type to the fixed-width `int64_t` type. The caller must ensure that the value is representable as a 64-bit signed integer. The function enforces this precondition with REQUIRES checks against `INT64_MIN` and `INT64_MAX` from `<stdint.h>`.
+
+On the Linux target required by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical value ranges, so the REQUIRES range checks are always satisfied on that target. The checks are retained to make the valid input range explicit and to keep the function portable to any future target where `long` and `int64_t` have different widths.
+
+### Interactions
+
+| Parameter | Direction | Type    | Description                                               |
+| --------- | --------- | ------- | --------------------------------------------------------- |
+| input     | in        | long    | The platform-dependent long value to convert.             |
+| return    | out       | int64_t | The input value as a fixed-width 64-bit signed integer.   |
+
+Other changes to system state include:
+
+- None
+
+*/
+
+    int64_t int64_from_long(long input)
+    {
+        int64_t result = 0;
+
+        REQUIRES(input >= INT64_MIN, "input value is below the INT64_MIN bound");
+        REQUIRES(input <= INT64_MAX, "input value is above the INT64_MAX bound");
+
+        result = input;
+
+        ENSURES(result == input, "Conversion did not preserve the integer value");
+
+        return(result);
+    }
+
+/*
+## long from int64_t
+
+Converts a value of the fixed-width `int64_t` type to the platform-dependent C `long` type. The caller must ensure that the value is representable as a platform `long`. The function enforces this precondition with REQUIRES checks against `LONG_MIN` and `LONG_MAX` from `<limits.h>`.
+
+On the Linux target required by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical value ranges, so the REQUIRES range checks are always satisfied on that target. The checks are retained to make the valid input range explicit and to keep the function portable to any future target where `long` and `int64_t` have different widths.
+
+### Interactions
+
+| Parameter | Direction | Type    | Description                                               |
+| --------- | --------- | ------- | --------------------------------------------------------- |
+| input     | in        | int64_t | The fixed-width 64-bit signed integer value to convert.   |
+| return    | out       | long    | The input value as a platform-dependent long.             |
+
+Other changes to system state include:
+
+- None
+
+*/
+
+    long long_from_int64(int64_t input)
+    {
+        long result = 0;
+
+        REQUIRES(input >= LONG_MIN, "input value is below the LONG_MIN bound");
+        REQUIRES(input <= LONG_MAX, "input value is above the LONG_MAX bound");
 
         result = input;
 

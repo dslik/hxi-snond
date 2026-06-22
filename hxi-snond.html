@@ -1283,14 +1283,14 @@ Other changes to system state include:
                 {
                     clock_gettime(CLOCK_MONOTONIC, &poll_end);
 
-                    poll_start_nsec = ((int64_t) poll_start.tv_sec * C_NS_PER_SECOND) + (int64_t) poll_start.tv_nsec;
-                    poll_end_nsec = ((int64_t) poll_end.tv_sec * C_NS_PER_SECOND) + (int64_t) poll_end.tv_nsec;
+                    poll_start_nsec = (int64_from_time(poll_start.tv_sec) * C_NS_PER_SECOND) + int64_from_time(poll_start.tv_nsec);
+                    poll_end_nsec =   (int64_from_time(poll_end.tv_sec)   * C_NS_PER_SECOND) + int64_from_time(poll_end.tv_nsec);
 
                     remaining_ns = C_POLL_INTERVAL_NS - (poll_end_nsec - poll_start_nsec);
 
                     if(0 < remaining_ns)
                     {
-                        sleep_duration.tv_sec = (time_t) (remaining_ns / C_NS_PER_SECOND);
+                        sleep_duration.tv_sec = time_from_int64(remaining_ns / C_NS_PER_SECOND);
                         sleep_duration.tv_nsec = (long) (remaining_ns % C_NS_PER_SECOND);
                         nanosleep(&sleep_duration, NULL);
                     }

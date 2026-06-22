@@ -9,3 +9,6 @@ ssize_t ssize_from_int64(int64_t input);
 
 int64_t int64_from_time(time_t input);
 time_t time_from_int64(int64_t input);
+
+int64_t int64_from_long(long input);
+long long_from_int64(int64_t input);

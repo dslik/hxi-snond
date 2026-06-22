@@ -5,28 +5,27 @@
     // ---------------------------------------------------------------------------------
     // Tests for the primitive integer type conversion helper functions declared in
     // asdfg-c-types.h, exercising int32_from_int, int_from_int32, int64_from_ssize,
-    // and ssize_from_int64 across typical values, zero, negative values, and the
-    // bounds of the input type.
+    // ssize_from_int64, int64_from_long, and long_from_int64 across typical values,
+    // zero, negative values, and the bounds of the input type.
     // ---------------------------------------------------------------------------------
     // SPDX-FileCopyrightText: Copyright 2026 David Slik
     // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
     // SPDX-License-Identifier: BSD-3-Clause
     // ---------------------------------------------------------------------------------
 
-    #include <stdint.h>         // Fixed-width integer types (int32_t, int64_t) and bounds (INT32_MIN, INT32_MAX, INT64_MIN, INT64_MAX)
-    #include <limits.h>         // Platform int bounds (INT_MIN, INT_MAX)
-    #include <sys/types.h>      // POSIX ssize_t type, required by int64_from_ssize and ssize_from_int64
+    #include <stdint.h>         // Fixed-width integer types (int32_t, int64_t) and bounds (INT32_MIN, INT32_MAX, etc.)
+    #include <limits.h>         // Platform int bounds (INT_MIN, INT_MAX, etc.)
     #include <stdlib.h>         // EXIT_SUCCESS and EXIT_FAILURE for the main return value
     #include <stdbool.h>        // true, false
 
     // Local includes
-    #include "asdfg-c-types.h"  // Declarations of int32_from_int, int_from_int32, int64_from_ssize, and ssize_from_int64 under test
-    #include "asdfg-c-dbc.h"    // ASSERT contract macro used to verify test outcomes
+    #include "asdfg-c-types.h"  // Type conversion helper functions
+    #include "asdfg-c-dbc.h"    // Design-by-contract library
 
 /*
 ## Integer type conversion helper tests
 
-This file provides unit tests for the four conversion helper functions defined in `asdfg-c-types.html`: `int32_from_int`, `int_from_int32`, `int64_from_ssize`, and `ssize_from_int64`. Each test exercises a single representative value and verifies that the conversion preserves it.
+This file provides unit tests for the six conversion helper functions defined in `asdfg-c-types.html`: `int32_from_int`, `int_from_int32`, `int64_from_ssize`, `ssize_from_int64`, `int64_from_long`, and `long_from_int64`. Each test exercises a single representative value and verifies that the conversion preserves it.
 
 The tests for `int32_from_int` call the function with a representative `int` value and assert that the returned `int32_t` holds the same value. Because `int32_t` and `int` have identical representations on the Linux target required by rule 11.1, integer constants such as `42` (which are of type `int`) are compared directly against `int32_t` results in the ASSERT conditions, following the same pattern used in the ENSURES check within the source functions under test.
 
@@ -35,6 +34,10 @@ The tests for `int_from_int32` verify the round-trip property: an `int32_t` inpu
 The tests for `int64_from_ssize` call the function with a representative value and assert that the returned `int64_t` holds the same value. On the Linux target required by rule 11.1, `ssize_t` and `int64_t` are both 64-bit signed types with identical value ranges, so integer constants such as `42` (which are of type `int`) are implicitly widened to `ssize_t` by the function call without loss of value, and `INT64_MAX` and `INT64_MIN` exercise the full extent of the shared range.
 
 The tests for `ssize_from_int64` verify the round-trip property: an `int64_t` input converted to `ssize_t` by `ssize_from_int64` and immediately converted back to `int64_t` by `int64_from_ssize` must equal the original input. This approach avoids storing a `ssize_t` result in a local variable, which is inadvisable per rule 6.19.
+
+The tests for `int64_from_long` call the function with a representative value and assert that the returned `int64_t` holds the same value. On the Linux target required by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical value ranges, so `LONG_MAX` and `LONG_MIN` exercise the full extent of the shared range and also mark the outer bounds of the REQUIRES preconditions in `int64_from_long`.
+
+The tests for `long_from_int64` verify the round-trip property: an `int64_t` input converted to `long` by `long_from_int64` and immediately converted back to `int64_t` by `int64_from_long` must equal the original input. This approach avoids storing a `long` result in a local variable, which is not permitted by rules 6.17 and 6.18. On the Linux target, `INT64_MAX` and `INT64_MIN` equal `LONG_MAX` and `LONG_MIN`, so tests 4 and 5 also exercise the bounds of the REQUIRES preconditions in `long_from_int64`.
 
 Five tests are provided for each function, covering a typical positive value, zero, a typical negative value, the upper bound of the shared type range, and the lower bound.
 */
@@ -781,6 +784,280 @@ Other changes to system state include:
     }
 
 /*
+## int64_from_long test 1
+
+Tests that `int64_from_long` preserves a typical positive value. A value of 42
+is chosen as a representative positive `long` value that is well within the range
+of `int64_t`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_long_test_1(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_long(42);
+        ASSERT(42 == result, "Expected 42 to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_long test 2
+
+Tests that `int64_from_long` preserves zero. Zero is the identity value for
+signed integers and must pass through the conversion unchanged.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_long_test_2(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_long(0);
+        ASSERT(0 == result, "Expected 0 to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_long test 3
+
+Tests that `int64_from_long` preserves a typical negative value. A value of -1
+is chosen as a representative negative `long` value that is well within the
+range of `int64_t`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_long_test_3(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_long(-1);
+        ASSERT(-1 == result, "Expected -1 to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_long test 4
+
+Tests that `int64_from_long` preserves `LONG_MAX`, the largest value
+representable in `long`. On the Linux target required by rule 11.1, `long` and
+`int64_t` are both 64-bit signed types with identical value ranges, so `LONG_MAX`
+equals `INT64_MAX` and also marks the upper bound of the REQUIRES precondition.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_long_test_4(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_long(LONG_MAX);
+        ASSERT(LONG_MAX == result, "Expected LONG_MAX to be preserved, got %ld", result);
+    }
+
+/*
+## int64_from_long test 5
+
+Tests that `int64_from_long` preserves `LONG_MIN`, the smallest value
+representable in `long`. On the Linux target required by rule 11.1, `long` and
+`int64_t` are both 64-bit signed types with identical value ranges, so `LONG_MIN`
+equals `INT64_MIN` and also marks the lower bound of the REQUIRES precondition.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void int64_from_long_test_5(void)
+    {
+        int64_t result = 0;
+
+        result = int64_from_long(LONG_MIN);
+        ASSERT(LONG_MIN == result, "Expected LONG_MIN to be preserved, got %ld", result);
+    }
+
+/*
+## long_from_int64 test 1
+
+Tests that `long_from_int64` preserves a typical positive value. An `int64_t`
+input of 42 is converted to `long` by `long_from_int64` and immediately converted
+back to `int64_t` by `int64_from_long`; the final result must equal the original
+input of 42.
+
+The round-trip strategy is used because storing a `long` result in a local variable
+is not permitted by rules 6.17 and 6.18. The composition is a valid test because
+any error introduced by `long_from_int64` would propagate through `int64_from_long`
+and cause the final `int64_t` result to differ from the original input.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void long_from_int64_test_1(void)
+    {
+        int64_t input_value = 42;
+        int64_t result = 0;
+
+        result = int64_from_long(long_from_int64(input_value));
+        ASSERT(42 == result, "Expected 42 to round-trip, got %ld", result);
+    }
+
+/*
+## long_from_int64 test 2
+
+Tests that `long_from_int64` preserves zero. An `int64_t` input of 0 is
+converted to `long` and immediately converted back to `int64_t`; the result
+must equal 0.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void long_from_int64_test_2(void)
+    {
+        int64_t input_value = 0;
+        int64_t result = 0;
+
+        result = int64_from_long(long_from_int64(input_value));
+        ASSERT(0 == result, "Expected 0 to round-trip, got %ld", result);
+    }
+
+/*
+## long_from_int64 test 3
+
+Tests that `long_from_int64` preserves a typical negative value. An `int64_t`
+input of -1 is converted to `long` and immediately converted back to `int64_t`;
+the result must equal -1.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void long_from_int64_test_3(void)
+    {
+        int64_t input_value = -1;
+        int64_t result = 0;
+
+        result = int64_from_long(long_from_int64(input_value));
+        ASSERT(-1 == result, "Expected -1 to round-trip, got %ld", result);
+    }
+
+/*
+## long_from_int64 test 4
+
+Tests that `long_from_int64` preserves `INT64_MAX`. On the Linux target required
+by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical
+value ranges, so `INT64_MAX` equals `LONG_MAX` and also exercises the upper bound
+of the REQUIRES precondition in `long_from_int64`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void long_from_int64_test_4(void)
+    {
+        int64_t input_value = INT64_MAX;
+        int64_t result = 0;
+
+        result = int64_from_long(long_from_int64(input_value));
+        ASSERT(INT64_MAX == result, "Expected INT64_MAX to round-trip, got %ld", result);
+    }
+
+/*
+## long_from_int64 test 5
+
+Tests that `long_from_int64` preserves `INT64_MIN`. On the Linux target required
+by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical
+value ranges, so `INT64_MIN` equals `LONG_MIN` and also exercises the lower bound
+of the REQUIRES precondition in `long_from_int64`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void long_from_int64_test_5(void)
+    {
+        int64_t input_value = INT64_MIN;
+        int64_t result = 0;
+
+        result = int64_from_long(long_from_int64(input_value));
+        ASSERT(INT64_MIN == result, "Expected INT64_MIN to round-trip, got %ld", result);
+    }
+
+/*
 ## main
 
 Runs all thirty unit tests for `int32_from_int`, `int_from_int32`, `int64_from_ssize`, `ssize_from_int64`, `int64_from_time`, and
@@ -836,6 +1113,18 @@ Other changes to system state include:
         time_from_int64_test_3();
         time_from_int64_test_4();
         time_from_int64_test_5();
+
+        int64_from_long_test_1();
+        int64_from_long_test_2();
+        int64_from_long_test_3();
+        int64_from_long_test_4();
+        int64_from_long_test_5();
+
+        long_from_int64_test_1();
+        long_from_int64_test_2();
+        long_from_int64_test_3();
+        long_from_int64_test_4();
+        long_from_int64_test_5();
 
         return(exit_code);
     }
