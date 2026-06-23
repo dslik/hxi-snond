@@ -5,8 +5,8 @@
     // ---------------------------------------------------------------------------------
     // Tests for the primitive integer type conversion helper functions declared in
     // asdfg-c-types.h, exercising int32_from_int, int_from_int32, int64_from_ssize,
-    // ssize_from_int64, int64_from_long, and long_from_int64 across typical values,
-    // zero, negative values, and the bounds of the input type.
+    // ssize_from_int64, int64_from_long, long_from_int64, size_from_socklen, and
+    // socklen_from_size across typical values, zero, and the bounds of the input type.
     // ---------------------------------------------------------------------------------
     // SPDX-FileCopyrightText: Copyright 2026 David Slik
     // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
@@ -40,6 +40,10 @@ The tests for `int64_from_long` call the function with a representative value an
 The tests for `long_from_int64` verify the round-trip property: an `int64_t` input converted to `long` by `long_from_int64` and immediately converted back to `int64_t` by `int64_from_long` must equal the original input. This approach avoids storing a `long` result in a local variable, which is not permitted by rules 6.17 and 6.18. On the Linux target, `INT64_MAX` and `INT64_MIN` equal `LONG_MAX` and `LONG_MIN`, so tests 4 and 5 also exercise the bounds of the REQUIRES preconditions in `long_from_int64`.
 
 Five tests are provided for each function, covering a typical positive value, zero, a typical negative value, the upper bound of the shared type range, and the lower bound.
+
+The tests for `size_from_socklen` call the function with a representative value and assert that the returned `size_t` holds the same value. Since `socklen_t` is a 32-bit unsigned type and `size_t` is a 64-bit unsigned type on the Linux target required by rule 11.1, neither type has negative values. The five tests therefore cover a typical small positive value, zero (which is also the lower bound for unsigned types), 1 (the smallest non-zero value, filling the boundary-adjacent role that -1 fills for signed types), `UINT16_MAX` (a mid-range named constant from `<stdint.h>`), and `UINT32_MAX` (the upper bound of `socklen_t`, which also marks the bound checked by the REQUIRES precondition in `socklen_from_size`). Integer constants such as `42` and `1` are of type `int` and are implicitly widened to `socklen_t` by the function call.
+
+The tests for `socklen_from_size` verify the round-trip property: a `size_t` input converted to `socklen_t` by `socklen_from_size` and immediately converted back to `size_t` by `size_from_socklen` must equal the original input. The round-trip strategy is used because storing a `socklen_t` result in a local variable is inadvisable per rule 6.19. The composition is a valid test because any error introduced by `socklen_from_size` would propagate through `size_from_socklen` and cause the final `size_t` result to differ from the original input. The test with `UINT32_MAX` also exercises the upper bound of the REQUIRES precondition in `socklen_from_size`, since `UINT32_MAX` is the largest value that satisfies `input <= UINT32_MAX`.
 */
 
 /*
@@ -165,7 +169,7 @@ Other changes to system state include:
 /*
 ## int_from_int32 test 1
 
-Tests that `int_from_int32` preserves a typical positive value. An `int32_t` input of 42 is converted to `int` by `int_from_int32` and immediately converted back to `int32_t` by `int32_from_int`; the final result must equal the original input of 42.
+Tests that `int_from_int32` preserves a typical positive value. An `int32_t` input of 42 is converted to `int` by `int_from_int32` and immediately converted back to `int32_t` by `int32_from_int`. The final result must equal the original input of 42.
 
 The round-trip strategy is used because storing an `int` result in a local variable is not permitted by rules 6.17 and 6.18. The composition is a valid test because any error introduced by `int_from_int32` would propagate through `int32_from_int` and cause the final `int32_t` result to differ from the original input.
 
@@ -412,7 +416,7 @@ Other changes to system state include:
 /*
 ## ssize_from_int64 test 1
 
-Tests that `ssize_from_int64` preserves a typical positive value. An `int64_t` input of 42 is converted to `ssize_t` by `ssize_from_int64` and immediately converted back to `int64_t` by `int64_from_ssize`; the final result must equal the original input of 42.
+Tests that `ssize_from_int64` preserves a typical positive value. An `int64_t` input of 42 is converted to `ssize_t` by `ssize_from_int64` and immediately converted back to `int64_t` by `int64_from_ssize`. The final result must equal the original input of 42.
 
 The round-trip strategy is used because storing a `ssize_t` result in a local variable is inadvisable per rule 6.19. The composition is a valid test because any error introduced by `ssize_from_int64` would propagate through `int64_from_ssize` and cause the final `int64_t` result to differ from the original input.
 
@@ -659,7 +663,7 @@ Other changes to system state include:
 /*
 ## time_from_int64 test 1
 
-Tests that `time_from_int64` preserves a typical positive value. An `int64_t` input of 42 is converted to `time_t` by `time_from_int64` and immediately converted back to `int64_t` by `int64_from_time`; the final result must equal the original input of 42.
+Tests that `time_from_int64` preserves a typical positive value. An `int64_t` input of 42 is converted to `time_t` by `time_from_int64` and immediately converted back to `int64_t` by `int64_from_time`. The final result must equal the original input of 42.
 
 The round-trip strategy is used because storing a `time_t` result in a local variable is inadvisable per rule 6.19. The composition is a valid test because any error introduced by `time_from_int64` would propagate through `int64_from_time` and cause the final `int64_t` result to differ from the original input.
 
@@ -786,9 +790,7 @@ Other changes to system state include:
 /*
 ## int64_from_long test 1
 
-Tests that `int64_from_long` preserves a typical positive value. A value of 42
-is chosen as a representative positive `long` value that is well within the range
-of `int64_t`.
+Tests that `int64_from_long` preserves a typical positive value. A value of 42 is chosen as a representative positive `long` value that is well within the range of `int64_t`.
 
 ### Interactions
 
@@ -812,8 +814,7 @@ Other changes to system state include:
 /*
 ## int64_from_long test 2
 
-Tests that `int64_from_long` preserves zero. Zero is the identity value for
-signed integers and must pass through the conversion unchanged.
+Tests that `int64_from_long` preserves zero. Zero is the identity value for signed integers and must pass through the conversion unchanged.
 
 ### Interactions
 
@@ -837,9 +838,7 @@ Other changes to system state include:
 /*
 ## int64_from_long test 3
 
-Tests that `int64_from_long` preserves a typical negative value. A value of -1
-is chosen as a representative negative `long` value that is well within the
-range of `int64_t`.
+Tests that `int64_from_long` preserves a typical negative value. A value of -1 is chosen as a representative negative `long` value that is well within the range of `int64_t`.
 
 ### Interactions
 
@@ -863,10 +862,7 @@ Other changes to system state include:
 /*
 ## int64_from_long test 4
 
-Tests that `int64_from_long` preserves `LONG_MAX`, the largest value
-representable in `long`. On the Linux target required by rule 11.1, `long` and
-`int64_t` are both 64-bit signed types with identical value ranges, so `LONG_MAX`
-equals `INT64_MAX` and also marks the upper bound of the REQUIRES precondition.
+Tests that `int64_from_long` preserves `LONG_MAX`, the largest value representable in `long`. On the Linux target required by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical value ranges, so `LONG_MAX` equals `INT64_MAX` and also marks the upper bound of the REQUIRES precondition.
 
 ### Interactions
 
@@ -890,10 +886,7 @@ Other changes to system state include:
 /*
 ## int64_from_long test 5
 
-Tests that `int64_from_long` preserves `LONG_MIN`, the smallest value
-representable in `long`. On the Linux target required by rule 11.1, `long` and
-`int64_t` are both 64-bit signed types with identical value ranges, so `LONG_MIN`
-equals `INT64_MIN` and also marks the lower bound of the REQUIRES precondition.
+Tests that `int64_from_long` preserves `LONG_MIN`, the smallest value representable in `long`. On the Linux target required by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical value ranges, so `LONG_MIN` equals `INT64_MIN` and also marks the lower bound of the REQUIRES precondition.
 
 ### Interactions
 
@@ -917,15 +910,9 @@ Other changes to system state include:
 /*
 ## long_from_int64 test 1
 
-Tests that `long_from_int64` preserves a typical positive value. An `int64_t`
-input of 42 is converted to `long` by `long_from_int64` and immediately converted
-back to `int64_t` by `int64_from_long`; the final result must equal the original
-input of 42.
+Tests that `long_from_int64` preserves a typical positive value. An `int64_t` input of 42 is converted to `long` by `long_from_int64` and immediately converted back to `int64_t` by `int64_from_long`. The final result must equal the original input of 42.
 
-The round-trip strategy is used because storing a `long` result in a local variable
-is not permitted by rules 6.17 and 6.18. The composition is a valid test because
-any error introduced by `long_from_int64` would propagate through `int64_from_long`
-and cause the final `int64_t` result to differ from the original input.
+The round-trip strategy is used because storing a `long` result in a local variable is not permitted by rules 6.17 and 6.18. The composition is a valid test because any error introduced by `long_from_int64` would propagate through `int64_from_long` and cause the final `int64_t` result to differ from the original input.
 
 ### Interactions
 
@@ -950,9 +937,7 @@ Other changes to system state include:
 /*
 ## long_from_int64 test 2
 
-Tests that `long_from_int64` preserves zero. An `int64_t` input of 0 is
-converted to `long` and immediately converted back to `int64_t`; the result
-must equal 0.
+Tests that `long_from_int64` preserves zero. An `int64_t` input of 0 is converted to `long` and immediately converted back to `int64_t` The result must equal 0.
 
 ### Interactions
 
@@ -977,9 +962,7 @@ Other changes to system state include:
 /*
 ## long_from_int64 test 3
 
-Tests that `long_from_int64` preserves a typical negative value. An `int64_t`
-input of -1 is converted to `long` and immediately converted back to `int64_t`;
-the result must equal -1.
+Tests that `long_from_int64` preserves a typical negative value. An `int64_t` input of -1 is converted to `long` and immediately converted back to `int64_t`; the result must equal -1.
 
 ### Interactions
 
@@ -1004,10 +987,7 @@ Other changes to system state include:
 /*
 ## long_from_int64 test 4
 
-Tests that `long_from_int64` preserves `INT64_MAX`. On the Linux target required
-by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical
-value ranges, so `INT64_MAX` equals `LONG_MAX` and also exercises the upper bound
-of the REQUIRES precondition in `long_from_int64`.
+Tests that `long_from_int64` preserves `INT64_MAX`. On the Linux target required by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical value ranges, so `INT64_MAX` equals `LONG_MAX` and also exercises the upper bound of the REQUIRES precondition in `long_from_int64`.
 
 ### Interactions
 
@@ -1032,10 +1012,7 @@ Other changes to system state include:
 /*
 ## long_from_int64 test 5
 
-Tests that `long_from_int64` preserves `INT64_MIN`. On the Linux target required
-by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical
-value ranges, so `INT64_MIN` equals `LONG_MIN` and also exercises the lower bound
-of the REQUIRES precondition in `long_from_int64`.
+Tests that `long_from_int64` preserves `INT64_MIN`. On the Linux target required by rule 11.1, `long` and `int64_t` are both 64-bit signed types with identical value ranges, so `INT64_MIN` equals `LONG_MIN` and also exercises the lower bound of the REQUIRES precondition in `long_from_int64`.
 
 ### Interactions
 
@@ -1058,16 +1035,263 @@ Other changes to system state include:
     }
 
 /*
+## size_from_socklen test 1
+
+Tests that `size_from_socklen` preserves a typical positive value. A value of 42 is chosen as a representative positive `socklen_t` value that is well within the range of `size_t`. The integer constant 42 is of type `int` and is implicitly widened to `socklen_t` by the function call.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void size_from_socklen_test_1(void)
+    {
+        size_t result = 0;
+
+        result = size_from_socklen(42);
+        ASSERT(42 == result, "Expected 42 to be preserved, got %zu", result);
+    }
+
+/*
+## size_from_socklen test 2
+
+Tests that `size_from_socklen` preserves zero. Zero is the lower bound of the unsigned `socklen_t` type and must pass through the conversion unchanged.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void size_from_socklen_test_2(void)
+    {
+        size_t result = 0;
+
+        result = size_from_socklen(0);
+        ASSERT(0 == result, "Expected 0 to be preserved, got %zu", result);
+    }
+
+/*
+## size_from_socklen test 3
+
+Tests that `size_from_socklen` preserves 1, the smallest non-zero `socklen_t` value. Since `socklen_t` is an unsigned type, there are no negative values. 1 fills the boundary-adjacent role that -1 fills for signed types.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void size_from_socklen_test_3(void)
+    {
+        size_t result = 0;
+
+        result = size_from_socklen(1);
+        ASSERT(1 == result, "Expected 1 to be preserved, got %zu", result);
+    }
+
+/*
+## size_from_socklen test 4
+
+Tests that `size_from_socklen` preserves `UINT16_MAX`, a named mid-range constant from `<stdint.h>` that lies well within the representable range of both `socklen_t` and `size_t`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void size_from_socklen_test_4(void)
+    {
+        size_t result = 0;
+
+        result = size_from_socklen(UINT16_MAX);
+        ASSERT(UINT16_MAX == result, "Expected UINT16_MAX to be preserved, got %zu", result);
+    }
+
+/*
+## size_from_socklen test 5
+
+Tests that `size_from_socklen` preserves `UINT32_MAX`, the largest value representable in `socklen_t` on the Linux 64-bit target required by rule 11.1. `UINT32_MAX` also marks the upper bound of the REQUIRES precondition in `socklen_from_size`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void size_from_socklen_test_5(void)
+    {
+        size_t result = 0;
+
+        result = size_from_socklen(UINT32_MAX);
+        ASSERT(UINT32_MAX == result, "Expected UINT32_MAX to be preserved, got %zu", result);
+    }
+
+/*
+## socklen_from_size test 1
+
+Tests that `socklen_from_size` preserves a typical positive value. A `size_t` input of 42 is converted to `socklen_t` by `socklen_from_size` and immediately converted back to `size_t` by `size_from_socklen`. The final result must equal the original input of 42.
+
+The round-trip strategy is used because storing a `socklen_t` result in a local variable is inadvisable per rule 6.19. The composition is a valid test because any error introduced by `socklen_from_size` would propagate through `size_from_socklen` and cause the final `size_t` result to differ from the original input.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void socklen_from_size_test_1(void)
+    {
+        size_t input_value = 42;
+        size_t result = 0;
+
+        result = size_from_socklen(socklen_from_size(input_value));
+        ASSERT(42 == result, "Expected 42 to round-trip, got %zu", result);
+    }
+
+/*
+## socklen_from_size test 2
+
+Tests that `socklen_from_size` preserves zero. A `size_t` input of 0 is converted to `socklen_t` and immediately converted back to `size_t`. The result must equal 0.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void socklen_from_size_test_2(void)
+    {
+        size_t input_value = 0;
+        size_t result = 0;
+
+        result = size_from_socklen(socklen_from_size(input_value));
+        ASSERT(0 == result, "Expected 0 to round-trip, got %zu", result);
+    }
+
+/*
+## socklen_from_size test 3
+
+Tests that `socklen_from_size` preserves 1, the smallest non-zero `size_t` value that is representable as `socklen_t`. A `size_t` input of 1 is converted to `socklen_t` and immediately converted back to `size_t`. The result must equal 1.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void socklen_from_size_test_3(void)
+    {
+        size_t input_value = 1;
+        size_t result = 0;
+
+        result = size_from_socklen(socklen_from_size(input_value));
+        ASSERT(1 == result, "Expected 1 to round-trip, got %zu", result);
+    }
+
+/*
+## socklen_from_size test 4
+
+Tests that `socklen_from_size` preserves `UINT16_MAX`. A `size_t` input of `UINT16_MAX` is converted to `socklen_t` and immediately converted back to `size_t`. The result must equal `UINT16_MAX`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void socklen_from_size_test_4(void)
+    {
+        size_t input_value = UINT16_MAX;
+        size_t result = 0;
+
+        result = size_from_socklen(socklen_from_size(input_value));
+        ASSERT(UINT16_MAX == result, "Expected UINT16_MAX to round-trip, got %zu", result);
+    }
+
+/*
+## socklen_from_size test 5
+
+Tests that `socklen_from_size` preserves `UINT32_MAX`. A `size_t` input of `UINT32_MAX` is converted to `socklen_t` and immediately converted back to `size_t`. The result must equal `UINT32_MAX`. This test also exercises the upper bound of the REQUIRES precondition in `socklen_from_size`, since `UINT32_MAX` is the largest value that satisfies `input <= UINT32_MAX`.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+*/
+
+    void socklen_from_size_test_5(void)
+    {
+        size_t input_value = UINT32_MAX;
+        size_t result = 0;
+
+        result = size_from_socklen(socklen_from_size(input_value));
+        ASSERT(UINT32_MAX == result, "Expected UINT32_MAX to round-trip, got %zu", result);
+    }
+
+/*
 ## main
 
-Runs all thirty unit tests for `int32_from_int`, `int_from_int32`, `int64_from_ssize`, `ssize_from_int64`, `int64_from_time`, and
-`time_from_int64` in function-number order. Each test calls ASSERT internally; `safety_abort` aborts the process if any assertion fails. A clean return of EXIT_SUCCESS therefore confirms that all twenty assertions passed.
+Runs all fifty unit tests for `int32_from_int`, `int_from_int32`, `int64_from_ssize`, `ssize_from_int64`, `int64_from_time`,
+`time_from_int64`, `int64_from_long`, `long_from_int64`, `size_from_socklen`, and `socklen_from_size` in function-number order. Each test calls ASSERT internally. `safety_abort` aborts the process if any assertion fails. A clean return of EXIT_SUCCESS therefore confirms that all fifty assertions passed.
 
 ### Interactions
 
 | Parameter | Direction | Type | Description                                                              |
 | --------- | --------- | ---- | ------------------------------------------------------------------------ |
-| return    | out       | int  | EXIT_SUCCESS when all assertions pass; aborts before returning on failure. |
+| return    | out       | int  | EXIT_SUCCESS when all assertions pass, aborts before returning on failure. |
 
 Other changes to system state include:
 
@@ -1125,6 +1349,18 @@ Other changes to system state include:
         long_from_int64_test_3();
         long_from_int64_test_4();
         long_from_int64_test_5();
+
+        size_from_socklen_test_1();
+        size_from_socklen_test_2();
+        size_from_socklen_test_3();
+        size_from_socklen_test_4();
+        size_from_socklen_test_5();
+
+        socklen_from_size_test_1();
+        socklen_from_size_test_2();
+        socklen_from_size_test_3();
+        socklen_from_size_test_4();
+        socklen_from_size_test_5();
 
         return(exit_code);
     }

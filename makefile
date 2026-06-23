@@ -2,15 +2,19 @@ CFLAGS  += -Wall -Wextra -Werror -pedantic -ggdb -fno-omit-frame-pointer
 LDFLAGS += -rdynamic
 LDLIBS  += -lm
 
-TARGET      = hxi-snond
+TARGET      = hxi-snond gpm8310-snond
 TESTS       = asdfg-c-types-test
-SHARED_OBJS = asdfg-c-dbc.o asdfg-c-types.o
-DAEMON_OBJS = hxi-snond.o hxi-config.o cJSON.o $(SHARED_OBJS)
+SHARED_OBJS = asdfg-c-dbc.o asdfg-c-types.o asdfg-c-uuid.o
+HXI_OBJS    = hxi-snond.o hxi-config.o cJSON.o $(SHARED_OBJS)
+GPM_OBJS    = gpm8310-snond.o cJSON.o $(SHARED_OBJS)
 TEST_OBJS   = asdfg-c-types-tests.o $(SHARED_OBJS)
 
 all: $(TARGET) $(TESTS)
 
-$(TARGET): $(DAEMON_OBJS)
+hxi-snond: $(HXI_OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+gpm8310-snond: $(GPM_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 $(TESTS): $(TEST_OBJS)
@@ -20,6 +24,6 @@ $(TESTS): $(TEST_OBJS)
 	$(CC) $(CFLAGS) -x c -c $< -o $@
 
 clean:
-	$(RM) $(TARGET) $(TESTS) $(DAEMON_OBJS) $(TEST_OBJS)
+	$(RM) $(TARGET) $(TESTS) $(HXI_OBJS) $(GPM_OBJS) $(TEST_OBJS)
 
 .PHONY: all clean

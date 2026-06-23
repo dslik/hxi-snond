@@ -283,4 +283,66 @@ Other changes to system state include:
         return(result);
     }
 
+/*
+## size_t from socklen_t
+
+Converts a value of the POSIX-defined `socklen_t` type to the C `size_t` type. On the Linux 64-bit target required by rule 11.1, `socklen_t` is a 32-bit unsigned type and `size_t` is a 64-bit unsigned type, so every `socklen_t` value is representable as `size_t` and no REQUIRES precondition check is required.
+
+### Interactions
+
+| Parameter | Direction | Type      | Description                                            |
+| --------- | --------- | --------- | ------------------------------------------------------ |
+| input     | in        | socklen_t | The POSIX socket-length value to convert.              |
+| return    | out       | size_t    | The input value as a C size_t.                         |
+
+Other changes to system state include:
+
+- None
+
+*/
+
+    size_t size_from_socklen(socklen_t input)
+    {
+        size_t result = 0;
+
+        result = input;
+
+        ENSURES(result == input, "Conversion did not preserve the integer value");
+
+        return(result);
+    }
+
+/*
+## socklen_t from size_t
+
+Converts a value of the C `size_t` type to the POSIX-defined `socklen_t` type. On the Linux 64-bit target required by rule 11.1, `size_t` is a 64-bit unsigned type and `socklen_t` is a 32-bit unsigned type, so the caller must ensure that the value does not exceed the 32-bit unsigned range. The function enforces this precondition with a REQUIRES check against `UINT32_MAX` from `<stdint.h>`.
+
+There is no `SOCKLEN_MAX` constant in POSIX; `UINT32_MAX` is used because `socklen_t` is defined as `unsigned int` (32 bits) on the Linux target.
+
+### Interactions
+
+| Parameter | Direction | Type      | Description                                            |
+| --------- | --------- | --------- | ------------------------------------------------------ |
+| input     | in        | size_t    | The C size value to convert.                           |
+| return    | out       | socklen_t | The input value as a POSIX-defined socklen_t.          |
+
+Other changes to system state include:
+
+- None
+
+*/
+
+    socklen_t socklen_from_size(size_t input)
+    {
+        socklen_t result = 0;
+
+        REQUIRES(input <= UINT32_MAX, "input value exceeds the maximum representable socklen_t value");
+
+        result = (socklen_t) input;
+
+        ENSURES(result == input, "Conversion did not preserve the integer value");
+
+        return(result);
+    }
+
 //</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>

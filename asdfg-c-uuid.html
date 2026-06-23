@@ -1,0 +1,166 @@
+//<!DOCTYPE html><html><title>ASDFG-C UUID Library</title><xmp theme="united" style="display:none;">
+
+    // ---------------------------------------------------------------------------------
+    // asdfg-c-uuid - UUID library functions
+    // ---------------------------------------------------------------------------------
+    // Implements utility routines to validate a UUID and to generate a random UUID
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+
+    #include <stdint.h>         // Fixed-width integer types: int32_t, uint32_t
+    #include <string.h>         // strlen
+    #include <ctype.h>          // isxdigit
+    #include <unistd.h>         // access, read, write, close, R_OK, W_OK
+    #include <fcntl.h>          // open, O_RDONLY, O_RDWR, O_CREAT, O_TRUNC
+
+    // Local includes
+    #include "asdfg-c-types.h"  // Type conversion helper functions
+    #include "asdfg-c-dbc.h"    // Design-by-contract library
+    #include "asdfg-c-uuid.h"   // UUID library functions
+
+/*
+### UUID library constants
+
+Constants used for UUID helper functions
+*/
+
+    // General
+    #define C_SUCCESS                   (0)         // Function return indicating success
+    #define C_FAILURE                   (-1)        // Function return indicating failure
+    
+    // ISO 8601 timestamp
+    #define C_ISO8601_LEN               28U         // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
+    
+    // RFC 4122 UUID
+    #define C_UUID_HYPHEN_1             8U          // Byte offset of first  hyphen in a UUID string
+    #define C_UUID_HYPHEN_2             13U         // Byte offset of second hyphen
+    #define C_UUID_HYPHEN_3             18U         // Byte offset of third  hyphen
+    #define C_UUID_HYPHEN_4             23U         // Byte offset of fourth hyphen
+
+/*
+## Validate a UUID string against the RFC 4122 canonical format
+
+Checks that the input string is exactly 36 bytes in length and conforms
+to the canonical UUID pattern `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`,
+where `x` is a hexadecimal digit (upper or lower case) and `-` appears
+at byte offsets 8, 13, 18, and 23.
+
+Because valid UUIDs consist entirely of ASCII characters, using strlen
+to obtain the byte count is correct and does not conflict with the
+UTF-8 string handling requirement of Rule 1.2.
+
+### Interactions
+
+| Parameter    | Direction | Type  | Description                                                        |
+| ------------ | --------- | ----- | ------------------------------------------------------------------ |
+| uuid_value   | in        | char* | Null-terminated string to validate                                 |
+| return value | out       | bool  | true if the string is a well-formed RFC 4122 UUID; false otherwise |
+
+*/
+
+    bool is_valid_uuid(const char* uuid_value)
+    {
+        uint32_t char_index = 0;
+        
+        REQUIRES(NULL != uuid_value, "NULL pointer passed for uuid_value");
+
+        if(C_UUID_STRLEN != strlen(uuid_value))
+        {
+            return(false);
+        }
+        
+        while(char_index < C_UUID_STRLEN)
+        {
+            if(C_UUID_HYPHEN_1 == char_index || C_UUID_HYPHEN_2 == char_index || C_UUID_HYPHEN_3 == char_index || C_UUID_HYPHEN_4 == char_index)
+            {
+                if('-' != uuid_value[char_index])
+                {
+                    return(false);
+                }
+            }
+            else
+            {
+                if(0 == isxdigit((unsigned char) uuid_value[char_index]))
+                {
+                    return(false);
+                }
+            }
+            
+            char_index = char_index + 1;
+        }
+        
+        return(true);
+    }
+
+/*
+## Generate a random RFC 4122 version 4 UUID string
+
+Reads 16 bytes of cryptographically random data from /dev/urandom,
+applies the version (4) and variant (1) bit fields required by RFC 4122
+section 4.4, and formats the result as a 36-character null-terminated
+UUID string of the form `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`.
+
+The caller must supply a buffer of at least 37 bytes.
+
+### Interactions
+
+| Parameter    | Direction | Type    | Description                                                                |
+| ------------ | --------- | ------- | -------------------------------------------------------------------------- |
+| uuid_value   | out       | char*   | Caller-allocated buffer of at least 37 bytes; receives the UUID string     |
+| return value | out       | int32_t | 0 on success; -1 if /dev/urandom cannot be opened or read                  |
+
+Other changes to system state include:
+
+- Opens and closes a file descriptor for /dev/urandom.
+- Reads 16 bytes from /dev/urandom.
+- Writes diagnostic messages to stderr on failure.
+
+*/
+
+    int32_t generate_random_uuid(char* uuid_value)
+    {
+        uint8_t     uuid_bytes[16] = {0};
+        int32_t     urandom_fd = -1;
+        int64_t     read_size = 0;
+        int32_t     status = C_SUCCESS;
+        
+        REQUIRES(NULL != uuid_value, "NULL pointer passed for uuid_value");
+
+        urandom_fd = int32_from_int(open("/dev/urandom", O_RDONLY));
+        
+        if(C_FAILURE == urandom_fd)
+        {
+            fprintf(stderr, "Unable to open /dev/urandom for UUID generation\n");
+            perror("/dev/urandom");
+            status = C_FAILURE;
+        }
+        else
+        {
+            read_size = read(urandom_fd, uuid_bytes, sizeof(uuid_bytes));
+
+            if(read_size != int64_from_ssize(sizeof(uuid_bytes)))
+            {
+                fprintf(stderr, "Unable to read from /dev/urandom for UUID generation\n");
+                perror("/dev/urandom");
+                status = C_FAILURE;
+            }
+            else
+            {
+                uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x40U; // Version 4
+                uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80U; // Variant 1
+                
+                snprintf(uuid_value, C_UUID_LEN, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", uuid_bytes[0],  uuid_bytes[1],  uuid_bytes[2],  uuid_bytes[3], uuid_bytes[4],  uuid_bytes[5], uuid_bytes[6],  uuid_bytes[7], uuid_bytes[8],  uuid_bytes[9], uuid_bytes[10], uuid_bytes[11], uuid_bytes[12], uuid_bytes[13], uuid_bytes[14], uuid_bytes[15]);
+            }
+        
+            close(urandom_fd);
+        }
+        
+        ENSURES(C_UUID_STRLEN == strlen(uuid_value), "Generated UUID has unexpected length %zu", strlen(uuid_value));
+
+        return(status);
+    }
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>

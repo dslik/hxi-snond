@@ -1,0 +1,871 @@
+//<!DOCTYPE html><html><title>GPM-8310 power meter driver</title><xmp theme="united" style="display:none;">
+/*
+## Overview
+
+Polls and writes sensor data from an Instek GPM-8130 power meter.
+
+Sensor data is written in <a href="https://www.snon.org/">SNON 4</a> <a href="https://datatracker.ietf.org/doc/html/rfc8428">SenML</a> format. The daemon opens a TCP/IP connection to the power meter, configures power integration, creates initial SNON device and sensor records on first run, then enters a continuous polling loop until SIGINT.
+
+Known issues:
+
+- Missing structured logging
+- Move helper functions into seperate source files
+- Reconnect and resume if connection lost
+
+*/
+
+    // ---------------------------------------------------------------------------------
+    // GPM-8310 Power Meter Sensor Daemon - Main routines
+    // ---------------------------------------------------------------------------------
+    // Polls and writes out sensor data from a GW Instek GPM-8310 power meter.
+    // Sensor data is written in SNON 4 format.
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/gpm8310-snond/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+
+    #include <errno.h>          // errno, ECONNRESET, ERANGE
+    #include <netdb.h>          // getaddrinfo, freeaddrinfo, struct addrinfo, gai_strerror
+    #include <stdint.h>         // Fixed-width integer types: int32_t, uint32_t
+    #include <stdbool.h>        // bool, true, false
+    #include <stdio.h>          // fprintf, snprintf, stderr
+    #include <stdlib.h>         // NULL, strtod
+    #include <string.h>         // strlen, strstr, strerror
+    #include <unistd.h>         // close
+    #include <limits.h>         // PATH_MAX
+    #include <sys/socket.h>     // socket, connect, recv, send, setsockopt, MSG_NOSIGNAL, SOL_SOCKET, SO_RCVTIMEO, SO_SNDTIMEO
+    #include <sys/time.h>       // struct timeval
+
+    // Local includes
+    #include "asdfg-c-types.h"  // Type conversion helper functions
+    #include "asdfg-c-dbc.h"    // Design-by-contract library
+    #include "asdfg-c-uuid.h"   // UUID library
+    #include "cJSON.h"          // cJSON library
+
+/*
+### Project constants
+
+HXi hardware identifiers are drawn from the USB vendor/product database.
+HXi protocol constants reflect the Corsair HID command set documented in
+community forum postings.
+
+PMBus LINEAR11 field constants are derived from the PMBus 1.3 specification,
+section 7.4.3.
+*/
+
+    // General
+    #define C_SUCCESS                   (0)     // Function return indicating success
+    #define C_FAILURE                   (-1)    // Function return indicating failure
+
+    // Connections
+    #define C_IO_TIMEOUT_S              (2)     // Seconds to wait for a send or receive before giving up
+    #define C_PORT_NUM_STR_LEN          (16u)   // TCP/IP Port string for getaddrinfo
+
+    // SCPI
+    #define C_CMD_BUF_LEN               (256u)  // SCPI Command buffer size
+    #define C_RESP_BUF_LEN              (256u)  // SCPI Response buffer size
+
+/*
+### Project prototypes
+
+Local functions
+*/
+
+    int main(int argc, char* argv[]);
+    int32_t gpm8310_collect_values(const char* output_path, int32_t dev_fd, char* sensor_uuid);
+    
+    // SCPI utility routines
+    int32_t scpi_send_cmd(int32_t socket_fd, const char* cmd);
+    int32_t scpi_recv_line(int32_t socket_fd, char* buffer, uint32_t buffer_length);
+
+    // Socket utility routines
+    int32_t socket_open(const char* host_name, uint32_t port_num);
+    int32_t socket_configure_timeouts(int32_t socket_fd);
+
+    // GPM 8310 access routines
+    int32_t gpm8310_connect(const char* dest_host_name, const char* dest_port_num);
+    int32_t gpm8310_instrument_identify(int32_t socket_fd);
+    int32_t gpm8310_instrument_configure(int32_t socket_fd);
+    int32_t gpm8310_read_wh(int32_t socket_fd, double* wh_out);
+    int32_t gpm8310_disconnect(int32_t socket_fd);
+
+/*
+### Project globals
+
+Global variables
+*/
+
+    // Global Variables
+    const char* g_usage = "Usage: gpm8310-snond [options]\n"
+                          "\n"
+                          "Options:\n"
+                          "  -a HOST     Hostname or IP address of the GPM 8310 power meter\n"
+                          "  -p PORT     TCP/IP port where the GPM 8310 power meter listens for incoming SCPI connections.\n"
+                          "  -o OUTPUT   Location to write SNON files (default: current working directory)\n"
+                          "  -u UUID     Device UUID (default: randomly generated)\n"
+                          "  -h          Show this help message\n";
+
+/*
+## GPM 8310 sensor daemon entry point
+
+Parses command-line arguments, opens and validates the TCP/IP connection to the GPM 8310 power meter, creates initial SNON device and sensor records on first run, then delegates continuous sensor value collection to `gpm8310_collect_values`.
+
+The daemon runs until it receives a SIGINT signal, at which point the signal handler sets `g_abort_collect` and the collection loop exits cleanly on its next polling iteration.
+
+### Interactions
+
+| Parameter       | Direction | Type         | Description                                                   |
+| --------------- | --------- | ------------ | ------------------------------------------------------------- |
+| argc            | in        | int          | POSIX count of command-line arguments; always >= 1            |
+| argv            | in        | char*[]      | POSIX argument vector; argv[0] is the program name            |
+| return value    | out       | int          | EXIT_SUCCESS (0) on clean exit; EXIT_FAILURE (1) on any error |
+
+Other changes to system state include:
+
+- May create up to two new JSON files in the output directory (device record and sensor record).
+- May create one new subdirectory in the output directory (sensor value directory).
+- Opens and closes a TCP/IP connection to the host specified by -d and the port specified by -p.
+
+*/
+
+    int main(int argc, char* argv[])
+    {
+        int32_t                 opt = 0;
+        const char*             device_addr = "127.0.0.1";
+        const char*             device_port = "23";
+        const char*             output_path = "./";
+        const char*             uuid_arg = NULL;
+        char                    device_uuid[C_UUID_LEN] = {0};
+        int32_t                 dev_fd = 0;
+        
+        // Obtain command line arguments
+        while(C_FAILURE != opt)
+        {
+            opt = getopt(argc, argv, "a:p:o:u:h");
+            
+            switch(opt)
+            {
+                case 'a':
+                {
+                    device_addr = optarg;
+                    break;
+                }
+                case 'p':
+                {
+                    device_port = optarg;
+                    break;
+                }
+                case 'o':
+                {
+                    output_path = optarg;
+                    break;
+                }
+                case 'u':
+                {
+                    uuid_arg = optarg;
+                    break;
+                }
+                case 'h':
+                {
+                    fprintf(stdout, "%s", g_usage);
+                    return(EXIT_SUCCESS);
+                }
+                case '?':
+                {
+                    fprintf(stderr, "%s", g_usage);
+                    return(EXIT_FAILURE);
+                }
+                case C_FAILURE:
+                {
+                    // getopt has finished; the while condition will exit the loop.
+                    break;
+                }
+                default:
+                {
+                    break;
+                }
+            }
+        }
+        
+        // ===========================================================
+        // Validate Inputs
+        
+        if(C_FAILURE == access(output_path, R_OK | W_OK))
+        {
+            fprintf(stderr, "Error accessing specified output directory: %s\n", output_path);
+            perror(output_path);
+            return(EXIT_FAILURE);
+        }
+                
+        // Ensure that the output directory ends with a "/"
+        if('/' != output_path[strlen(output_path) - 1])
+        {
+            fprintf(stderr, "Specified output directory does not end with a '/': %s\n", output_path);
+            return(EXIT_FAILURE);
+        }
+        
+        // Validate or generate UUID
+        if(NULL != uuid_arg)
+        {
+            if(false == is_valid_uuid(uuid_arg))
+            {
+                fprintf(stderr, "Invalid UUID format: %s\n", uuid_arg);
+                return(EXIT_FAILURE);
+            }
+            
+            memcpy(device_uuid, uuid_arg, sizeof(device_uuid));
+        }
+        else
+        {
+            if(C_FAILURE == generate_random_uuid(device_uuid))
+            {
+                fprintf(stderr, "Error generating random UUID\n");
+                return(EXIT_FAILURE);
+            }
+        }
+        
+        // ===========================================================
+        // Initialize a connecion to the GPM 8310 Power Analyzer
+        dev_fd =  gpm8310_connect(device_addr, device_port);
+
+        if(dev_fd <= 0)
+        {
+            fprintf(stderr, "Unable to connect to the GPM 8310 at address %s and port %s\n", device_addr, device_port);
+            perror(device_addr);
+            return(EXIT_FAILURE);
+        }
+        
+        if(C_SUCCESS != gpm8310_instrument_identify(dev_fd))
+        {
+            fprintf(stderr, "Unexpected Device\n");
+            close(dev_fd);
+            return(EXIT_FAILURE);
+        }
+        
+        if(C_SUCCESS != gpm8310_instrument_configure(dev_fd))
+        {
+            fprintf(stderr, "Unable to configure GPM 8310\n");
+            close(dev_fd);
+            return(EXIT_FAILURE);
+        }
+         
+        // ===========================================================
+        // Obtain GPM 8310 Power Supply Information
+        if(C_FAILURE == gpm8310_collect_values(output_path, dev_fd, device_uuid))
+        {
+            fprintf(stderr, "Error writing SNON value record\n");
+            gpm8310_disconnect(dev_fd);
+            return(EXIT_FAILURE);
+        }
+        
+        gpm8310_disconnect(dev_fd);
+        return(EXIT_SUCCESS);
+    }
+
+
+
+    int32_t gpm8310_collect_values(const char* output_path, int32_t dev_fd, char* sensor_uuid)
+    {
+        double  wh_value = 0.0;
+
+        REQUIRES(NULL != output_path, "NULL pointer passed for output_path");
+        REQUIRES(NULL != sensor_uuid, "NULL pointer passed for sensor_uuid");
+        REQUIRES(dev_fd >= 0, "Invalid file descriptor %d", dev_fd);
+
+        gpm8310_read_wh(dev_fd, &wh_value);
+        printf("Read wh value %f\n", wh_value);
+
+        sleep(20);
+
+        gpm8310_read_wh(dev_fd, &wh_value);
+        printf("Read wh value %f\n", wh_value);
+
+        return(C_SUCCESS);
+    }
+
+
+
+/*
+## Send an SCPI command to the power meter
+
+Takes a user-provided string that contains an SCPI command and sends it over the TCP/IP connection to the power meter.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                            |
+| ------------ | --------- | ----------- | ------------------------------------------------------ |
+| socket_fd    | in        | int32_t     | Connected TCP socket file descriptor.                  |
+| cmd          | in        | const char* | `\r\n`-terminated SCPI command string to transmit.     |
+| return value | out       | int32_t     | C_SUCCESS on success, C_FAILURE on failure.            |
+
+Other changes to system state include:
+
+- Writes to the socket identified by `socket_fd`.
+
+*/
+int32_t scpi_send_cmd(int32_t socket_fd, const char* cmd)
+{
+    int32_t    status = C_SUCCESS;
+    int64_t    send_result = 0;
+
+    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to scpi_send_cmd");
+    REQUIRES(NULL != cmd, "NULL command string passed to scpi_send_cmd");
+
+    send_result = int64_from_ssize(send(socket_fd, cmd, strlen(cmd), MSG_NOSIGNAL));
+
+    if(0 > send_result)
+    {
+        status = C_FAILURE;
+    }
+
+    return(status);
+}
+
+/*
+## Receive an SCPI command from the power meter
+
+Takes a user-provided buffer and reads an SCPI response into the buffer.
+
+### Interactions
+
+| Parameter     | Direction | Type     | Description                                                     |
+| ------------- | --------- | -------- | --------------------------------------------------------------- |
+| socket_fd     | in        | int32_t  | Connected TCP socket file descriptor.                           |
+| buffer        | out       | char*    | Caller-allocated buffer that receives the response line. Always null-terminated on return, even when an error occurs. |
+| buffer_length | in        | uint32_t | Byte capacity of `buffer`, including the null terminator. Shall be greater than zero. |
+| return value  | out       | int32_t  | C_SUCCESS on success, C_FAILURE on failure.                     |
+
+Other changes to system state include:
+
+- Reads from the socket identified by `socket_fd`.
+- Sets `errno` to `ECONNRESET` when the remote peer closes the connection.
+
+*/
+int32_t scpi_recv_line(int32_t socket_fd, char* buffer, uint32_t buffer_length)
+{
+    uint32_t    position = 0u;
+    int32_t     status = C_SUCCESS;
+    char        received_byte = '\0';
+    int64_t     recv_result = 0;
+    bool        accumulating = true;
+
+    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to scpi_recv_line");
+    REQUIRES(NULL != buffer, "NULL buffer pointer passed to scpi_recv_line");
+    REQUIRES(0u < buffer_length, "Zero-length buffer passed to scpi_recv_line");
+
+    while(true == accumulating)
+    {
+        recv_result = int64_from_ssize(recv(socket_fd, &received_byte, 1u, 0));
+
+        if(0 > recv_result)
+        {
+            // recv returned -1: a network error occurred, or SO_RCVTIMEO expired.
+            status = C_FAILURE;
+            accumulating = false;
+        }
+        else if(0 == recv_result)
+        {
+            // recv returned 0: the server closed the connection.
+            errno = ECONNRESET;
+            status = C_FAILURE;
+            accumulating = false;
+        }
+        else if('\n' == received_byte)
+        {
+            // End-of-line marker received: stop accumulating.
+            accumulating = false;
+        }
+        else if('\r' == received_byte)
+        {
+            // Bare CR character: discard and continue.
+        }
+        else
+        {
+            // Printable character: accumulate it into the buffer.
+            buffer[position] = received_byte;
+            position = position + 1u;
+            if(position >= (buffer_length - 1u))
+            {
+                // Buffer capacity reached: stop to preserve the null-terminator slot.
+                accumulating = false;
+            }
+        }
+    }
+
+    buffer[position] = '\0';
+
+    return(status);
+}
+
+/*
+## Opening the TCP connection
+
+`socket_open` resolves `host_name` via `getaddrinfo` and tries each returned address in order until a connection is established. On success it returns the connected socket file descriptor; on failure it returns `C_FAILURE`. The `struct addrinfo` linked list allocated by `getaddrinfo` is always freed before the function returns, regardless of outcome.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                               |
+| ------------ | --------- | ----------- | --------------------------------------------------------- |
+| host_name    | in        | const char* | Null-terminated hostname or IP address of the instrument. |
+| port_num     | in        | uint32_t    | TCP port number on which the instrument listens.          |
+| return value | out       | int32_t     | Connected socket file descriptor (>= 0) on success, C_FAILURE on failure. |
+
+Other changes to system state include:
+
+- Allocates and frees a `struct addrinfo` linked list via `getaddrinfo` and `freeaddrinfo`.
+- Opens a TCP socket file descriptor in the operating system on success.
+
+*/
+int32_t socket_open(const char* host_name, uint32_t port_num)
+{
+    int32_t             socket_fd = C_FAILURE;
+    char                port_num_str[C_PORT_NUM_STR_LEN] = {0};
+    struct addrinfo     hints = {0};
+    struct addrinfo*    res = NULL;
+    struct addrinfo*    rp = NULL;
+    int32_t             gai_result = 0;
+    int32_t             snprintf_result = 0;
+    int32_t             connect_result = 0;
+    bool                connect_succeeded = false;
+    bool                searching = false;
+
+    REQUIRES(NULL != host_name, "NULL host_name passed to socket_open");
+
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    snprintf_result = int32_from_int(snprintf(port_num_str, C_PORT_NUM_STR_LEN, "%u", port_num));
+    ASSERT(0 < snprintf_result, "snprintf failed to format port number %u", port_num);
+
+    // ASDFG-C 6.35 VIOLATION: getaddrinfo returns int; stored in int32_t (equivalent on Linux).
+    gai_result = int32_from_int(getaddrinfo(host_name, port_num_str, &hints, &res));
+
+    if(0 != gai_result)
+    {
+        fprintf(stderr, "socket_open: getaddrinfo(%s:%u): %s\n", host_name, port_num, gai_strerror(gai_result));
+    }
+    else
+    {
+        // Iterate over the resolved addresses and attempt a connection to each in turn,
+        // stopping as soon as one succeeds.
+        rp = res;
+        if(NULL != rp)
+        {
+            searching = true;
+        }
+
+        while(true == searching)
+        {
+            socket_fd = int32_from_int(socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol));
+
+            if(C_FAILURE != socket_fd)
+            {
+                connect_result = connect(socket_fd, rp->ai_addr, rp->ai_addrlen);
+                if(0 == connect_result)
+                {
+                    connect_succeeded = true;
+                    searching = false;
+                }
+                else
+                {
+                    close(socket_fd);
+                    socket_fd = C_FAILURE;
+                    rp = rp->ai_next;
+                    if(NULL == rp)
+                    {
+                        searching = false;
+                    }
+                }
+            }
+            else
+            {
+                rp = rp->ai_next;
+                if(NULL == rp)
+                {
+                    searching = false;
+                }
+            }
+        }
+
+        freeaddrinfo(res);
+
+        if(false == connect_succeeded)
+        {
+            fprintf(stderr, "socket_open: cannot reach %s:%u: %s\n", host_name, port_num, strerror(errno));
+            socket_fd = C_FAILURE;
+        }
+    }
+
+    return(socket_fd);
+}
+
+/*
+## Configuring socket I/O timeouts
+
+`socket_configure_timeouts` applies `SO_RCVTIMEO` and `SO_SNDTIMEO` to the socket, each set to `C_IO_TIMEOUT_S` seconds. After this call, `recv` and `send` will return with `EAGAIN` rather than blocking indefinitely when the instrument is unresponsive.
+
+### Interactions
+
+| Parameter    | Direction | Type    | Description                                           |
+| ------------ | --------- | ------- | ----------------------------------------------------- |
+| socket_fd    | in        | int32_t | Connected TCP socket file descriptor.                 |
+| return value | out       | int32_t | C_SUCCESS on success, C_FAILURE on failure.           |
+
+Other changes to system state include:
+
+- Sets `SO_RCVTIMEO` and `SO_SNDTIMEO` options on `socket_fd` via `setsockopt`.
+
+*/
+int32_t socket_configure_timeouts(int32_t socket_fd)
+{
+    struct timeval    io_timeout = {0};
+    int32_t           status = C_SUCCESS;
+    int32_t           rcvtimeo_result = 0;
+    int32_t           sndtimeo_result = 0;
+
+    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to socket_configure_timeouts");
+
+    io_timeout.tv_sec = C_IO_TIMEOUT_S;
+    io_timeout.tv_usec = 0;
+
+    rcvtimeo_result = setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, socklen_from_size(sizeof(io_timeout)));
+    sndtimeo_result = setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, socklen_from_size(sizeof(io_timeout)));
+
+    if((0 > rcvtimeo_result) || (0 > sndtimeo_result))
+    {
+        fprintf(stderr, "socket_configure_timeouts: setsockopt: %s\n", strerror(errno));
+        status = C_FAILURE;
+    }
+
+    return(status);
+}
+
+/*
+## Verify GPM-8310 SCPI Identity
+
+`gpm8310_instrument_identify` sends the standard `*IDN?` query and reads the instrument's identification string. It then checks that the response contains the substring `"8310"` to confirm the connected device is a GPM-8310 and not another instrument that happens to respond to SCPI commands on the same address. The identification string is printed to `stderr` on success to aid diagnostics.
+
+### Interactions
+
+| Parameter    | Direction | Type    | Description                                           |
+| ------------ | --------- | ------- | ----------------------------------------------------- |
+| socket_fd    | in        | int32_t | Connected TCP socket file descriptor.                 |
+| return value | out       | int32_t | C_SUCCESS on success, C_FAILURE on failure.    |
+
+Other changes to system state include:
+
+- Sends `*IDN?` to the instrument and reads one line of response.
+
+*/
+int32_t gpm8310_instrument_identify(int32_t socket_fd)
+{
+    char    resp[C_RESP_BUF_LEN] = {0};
+    char*   idn_match = NULL;
+    int32_t status = C_SUCCESS;
+
+    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_instrument_identify");
+
+    status = scpi_send_cmd(socket_fd, "*IDN?\r\n");
+    if(C_SUCCESS == status)
+    {
+        status = scpi_recv_line(socket_fd, resp, C_RESP_BUF_LEN);
+    }
+
+    if(C_SUCCESS != status)
+    {
+        fprintf(stderr, "gpm8310_instrument_identify: no response to *IDN?\n");
+    }
+    else
+    {
+        idn_match = strstr(resp, "8310");
+
+        if(NULL == idn_match)
+        {
+            fprintf(stderr, "gpm8310_instrument_identify: unexpected IDN (not a GPM-8310): \"%s\"\n", resp);
+            status = C_FAILURE;
+        }
+        else
+        {
+            fprintf(stderr, "gpm8310_instrument_identify: connected to: %s\n", resp);
+        }
+    }
+
+    return(status);
+}
+
+/*
+## Configure GPM-8310 for energy accumulation
+
+`gpm8310_instrument_configure` sends the sequence of SCPI commands that prepare the
+GPM-8310 for watt-hour accumulation. Each command is sent only if all preceding
+commands succeeded, so the first failure stops the sequence immediately.
+
+The commands issued are:
+
+1. `*CLS` - clear the status registers and error queue.
+2. `:RATE 100MS` - set the internal measurement period to 100 ms.
+3. `:INTEGrate:FUNCtion WATThour` - select watt-hour as the integrated quantity.
+4. `:INTEGrate:MODE MANual` - set the integrator to run until `:INTEGrate:STOP`
+   is issued, rather than for a fixed time.
+5. `:INTEGrate:RESet` - zero any previously accumulated energy.
+6. `:NUMeric:NORMal:ITEM1 WH` - bind numeric read-slot 1 to total Wh. Additional
+   slots can be mapped to `WHP` (positive Wh only), `WHM` (negative Wh only), or
+   `AH` (total ampere-hours) if needed by future callers.
+7. `:INTEGrate:STARt` - begin accumulation.
+
+After a successful return the instrument integrator is running.
+
+### Interactions
+
+| Parameter    | Direction | Type    | Description                                           |
+| ------------ | --------- | ------- | ----------------------------------------------------- |
+| socket_fd    | in        | int32_t | Connected TCP socket file descriptor.                 |
+| return value | out       | int32_t | C_SUCCESS on success, C_FAILURE on failure.    |
+
+Other changes to system state include:
+
+- Sends seven SCPI configuration commands to the instrument.
+- After a successful return, the instrument integrator is running and energy is
+  being accumulated into slot 1 (total Wh).
+
+*/
+int32_t gpm8310_instrument_configure(int32_t socket_fd)
+{
+    int32_t    status = C_SUCCESS;
+
+    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_instrument_configure");
+
+    // Clear the instrument's status registers and error queue.
+    status = scpi_send_cmd(socket_fd, "*CLS\r\n");
+
+    // :RATE 100MS - set the measurement calculation period to 100 ms.
+    // Valid values: 50MS 100MS 200MS 500MS 1S 2S 5S 10S 20S 30S AUTO
+    if(C_SUCCESS == status)
+    {
+        status = scpi_send_cmd(socket_fd, ":RATE 100MS\r\n");
+    }
+
+    // :INTEGrate:FUNCtion WATThour - select watt-hour accumulation.
+    if(C_SUCCESS == status)
+    {
+        status = scpi_send_cmd(socket_fd, ":INTEGrate:FUNCtion WATThour\r\n");
+    }
+
+    // :INTEGrate:MODE MANual - run continuously until :INTEGrate:STOP is sent.
+    if(C_SUCCESS == status)
+    {
+        status = scpi_send_cmd(socket_fd, ":INTEGrate:MODE MANual\r\n");
+    }
+
+    // :INTEGrate:RESet - zero any previously accumulated energy.
+    if(C_SUCCESS == status)
+    {
+        status = scpi_send_cmd(socket_fd, ":INTEGrate:RESet\r\n");
+    }
+
+    // :NUMeric:NORMal:ITEM1 WH - bind read-slot 1 to total accumulated Wh.
+    if(C_SUCCESS == status)
+    {
+        status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM1 WH\r\n");
+    }
+
+    // :INTEGrate:STARt - begin accumulation.
+    if(C_SUCCESS == status)
+    {
+        status = scpi_send_cmd(socket_fd, ":INTEGrate:STARt\r\n");
+    }
+
+    return(status);
+}
+
+/*
+## Connecting to the instrument
+
+`gpm8310_connect` orchestrates the four private setup functions in sequence. If any step fails the socket is closed and `C_FAILURE` is returned, so the caller never receives a descriptor that is in a partially-configured state. On success, the caller is responsible for eventually calling `gpm8310_disconnect`.
+*/
+
+/*
+### Interactions
+
+| Parameter      | Direction | Type        | Description                                             |
+| -------------- | --------- | ----------- | ------------------------------------------------------- |
+| dest_host_name | in        | const char* | Null-terminated hostname or IP address of the GPM-8310. |
+| dest_port_num  | in        | const char* | TCP port number on which the instrument listens.        |
+| return value   | out       | int32_t     | Connected socket file descriptor (>= 0) on success, C_INVALID_FD on failure. |
+
+Other changes to system state include:
+
+- Opens a TCP socket and configures it for SCPI communication.
+- On success, the instrument integrator is running; the caller must call
+  `gpm8310_disconnect` to stop it and close the socket.
+
+*/
+int32_t gpm8310_connect(const char* dest_host_name, const char* dest_port_num)
+{
+    int32_t     socket_fd = C_FAILURE;
+    int32_t     step_status = C_SUCCESS;
+    uint16_t    port_num = 0;
+
+    REQUIRES(NULL != dest_host_name, "NULL dest_host_name passed to gpm8310_connect");
+    REQUIRES(NULL != dest_port_num, "NULL dest_port_num passed to gpm8310_connect");
+
+    port_num = strtol(dest_port_num, NULL, 10);
+    socket_fd = socket_open(dest_host_name, port_num);
+
+    if(C_FAILURE == socket_fd)
+    {
+        step_status = C_FAILURE;
+    }
+
+    if(C_SUCCESS == step_status)
+    {
+        step_status = socket_configure_timeouts(socket_fd);
+    }
+
+    if(C_SUCCESS == step_status)
+    {
+        step_status = gpm8310_instrument_identify(socket_fd);
+    }
+
+    if(C_SUCCESS == step_status)
+    {
+        step_status = gpm8310_instrument_configure(socket_fd);
+    }
+
+    if(C_SUCCESS != step_status)
+    {
+        if(C_FAILURE != socket_fd)
+        {
+            close(socket_fd);
+            socket_fd = C_FAILURE;
+        }
+    }
+
+    return(socket_fd);
+}
+
+/*
+## Reading accumulated watt-hours
+
+`gpm8310_read_wh` queries `:NUMeric:VALue?`, which returns the value bound to numeric slot 1 - configured by `gpm8310_connect` as total accumulated watt-hours. The response is a number in scientific notation, for example `+1.23450E+00`, which is parsed with `strtod`.
+
+The use of floating point is unavoidable here: the GPM-8310 reports energy values in scientific notation and `strtod` returns `double`. See the annotation below for the corresponding rule deviation.
+
+`errno` is explicitly cleared to zero immediately before calling `strtod` so that the subsequent `ERANGE` check is not confused by an earlier error from a different system call.
+
+### Interactions
+
+| Parameter     | Direction | Type    | Description                                               |
+| ------------- | --------- | ------- | --------------------------------------------------------- |
+| socket_fd     | in        | int32_t | Socket file descriptor returned by `gpm8310_connect`.     |
+| wh_out        | out       | double* | Receives the accumulated watt-hours on success. Not written on failure. |
+| return value  | out       | int32_t | C_SUCCESS on success, C_FAILURES on failure.              |
+
+Other changes to system state include:
+
+- Sends `:NUMeric:VALue?` to the instrument and reads one line of response.
+- Sets `errno` to 0 before calling `strtod`.
+
+*/
+int32_t gpm8310_read_wh(int32_t socket_fd, double* wh_out)
+{
+    char    resp[C_RESP_BUF_LEN] = {0};
+    char*   parse_end = NULL;
+    double  val = 0.0;
+    int32_t status = C_SUCCESS;
+
+    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_read_wh");
+    REQUIRES(NULL != wh_out, "NULL wh_out pointer passed to gpm8310_read_wh");
+
+    // :NUMeric:VALue? returns one value per configured ITEM slot, comma-separated.
+    // With only ITEM1 mapped the response is a single number, e.g. "+1.23450E+00".
+    status = scpi_send_cmd(socket_fd, ":NUMeric:VALue?\r\n");
+    if(C_SUCCESS == status)
+    {
+        status = scpi_recv_line(socket_fd, resp, C_RESP_BUF_LEN);
+    }
+
+    if(C_SUCCESS != status)
+    {
+        fprintf(stderr, "gpm8310_read_wh: communication failed: %s\n", strerror(errno));
+    }
+    else
+    {
+        // Clear errno before strtod so that ERANGE detection is reliable.
+        errno = 0;
+
+        // ASDFG-C 6.23 VIOLATION: Floating point is unavoidable here. The GPM-8310
+        // reports energy values in scientific notation and strtod returns double.
+        val = strtod(resp, &parse_end);
+
+        if(parse_end == resp)
+        {
+            // strtod consumed zero characters: the response is not a number.
+            fprintf(stderr, "gpm8310_read_wh: non-numeric response: \"%s\"\n", resp);
+            status = C_FAILURE;
+        }
+        else if(ERANGE == errno)
+        {
+            // strtod set ERANGE: the parsed value overflowed or underflowed double.
+            fprintf(stderr, "gpm8310_read_wh: value out of range: \"%s\"\n", resp);
+            status = C_FAILURE;
+        }
+        else
+        {
+            *wh_out = val;
+        }
+    }
+
+    return(status);
+}
+
+/*
+## Disconnecting from the instrument
+
+`gpm8310_disconnect` sends `:INTEGrate:STOP` to halt the running integrator and `:COMMunicate:REMote OFF` to restore local control of the front panel, then closes the socket. Both SCPI commands are sent on a best-effort basis: if the connection is already impaired the errors are logged to `stderr` but do not prevent the socket from being closed.
+
+### Interactions
+
+| Parameter     | Direction | Type    | Description                                           |
+| ------------- | --------- | ------- | ----------------------------------------------------- |
+| socket_fd     | in        | int32_t | Socket file descriptor returned by `gpm8310_connect`. |
+
+Other changes to system state include:
+
+- Sends `:INTEGrate:STOP` and `:COMMunicate:REMote OFF` on a best-effort basis.
+- Closes the socket file descriptor.
+
+*/
+int32_t gpm8310_disconnect(int32_t socket_fd)
+{
+    int32_t    stop_status = C_SUCCESS;
+    int32_t    remote_status = C_SUCCESS;
+    int32_t    close_result = C_SUCCESS;
+
+    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_disconnect");
+
+    // Best-effort: stop the integrator. An error is logged but does not prevent disconnect.
+    stop_status = scpi_send_cmd(socket_fd, ":INTEGrate:STOP\r\n");
+    if(C_SUCCESS != stop_status)
+    {
+        fprintf(stderr, "gpm8310_disconnect: failed to stop integrator: %s\n", strerror(errno));
+    }
+
+    // Best-effort: restore local operation on the power meter.
+    remote_status = scpi_send_cmd(socket_fd, ":COMMunicate:REMote OFF\r\n");
+    if(C_SUCCESS != remote_status)
+    {
+        fprintf(stderr, "gpm8310_disconnect: failed to restore local mode: %s\n", strerror(errno));
+    }
+
+    close_result = close(socket_fd);
+    if(C_SUCCESS != close_result)
+    {
+        fprintf(stderr, "gpm8310_disconnect: close failed: %s\n", strerror(errno));
+    }
+
+    return(C_SUCCESS);
+}
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>
