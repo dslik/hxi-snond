@@ -1,0 +1,361 @@
+//<!DOCTYPE html><html><title>ASDFG-C UUID Library Tests</title><xmp theme="united" style="display:none;">
+
+    // ---------------------------------------------------------------------------------
+    // asdfg-c-uuid - UUID library function tests
+    // ---------------------------------------------------------------------------------
+    // Tests for the UUID helper functions declared in asdfg-c-uuid.h, exercising
+    // is_valid_uuid across well-formed and malformed inputs, and generate_random_uuid
+    // for return-value correctness, output validity, output length, version nibble,
+    // and variant nibble.
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+
+    #include <stdint.h>         // Fixed-width integer types (int32_t) and bounds
+    #include <stdbool.h>        // bool, true, false
+    #include <stdlib.h>         // EXIT_SUCCESS and EXIT_FAILURE for the main return value
+    #include <string.h>         // strlen
+
+    // Local includes
+    #include "asdfg-c-types.h"  // Type conversion helper functions
+    #include "asdfg-c-dbc.h"    // Design-by-contract library
+    #include "asdfg-c-uuid.h"   // UUID library functions
+
+/*
+## UUID library function tests
+
+This file provides unit tests for the two UUID helper functions defined in `asdfg-c-uuid.html`: `is_valid_uuid` and `generate_random_uuid`.
+
+The tests for `is_valid_uuid` pass a null-terminated string and assert that the returned `bool` matches the expected validity. Because `is_valid_uuid` enforces three distinct conditions — string length equal to `C_UUID_STRLEN` (36), hyphens at byte offsets 8, 13, 18, and 23, and `isxdigit` acceptance at every other position — the six tests are chosen to exercise each condition independently. Test 1 confirms the happy path with a well-formed all-lowercase UUID. Test 2 confirms the happy path with a well-formed all-uppercase UUID. Tests 1 and 2 together verify that `isxdigit` accepts both letter cases. Test 3 exercises the boundary case of the RFC 4122 nil UUID, where every hex position holds a digit rather than a letter. Test 4 provides a 35-byte string to exercise the length check, which fires before any character inspection. Test 5 provides a 36-byte string with the non-hex character 'g' at offset 35 to exercise the `isxdigit` branch. Test 6 provides a 36-byte string with '0' at offset 8 instead of the required '-' to exercise the hyphen-placement branch.
+
+The tests for `generate_random_uuid` call the function with a caller-allocated buffer of `C_UUID_LEN` bytes and inspect the result. Test 1 verifies that the return value is 0 (C_SUCCESS), confirming the happy-path status. Test 2 passes the output buffer to `is_valid_uuid` and asserts that it returns true, confirming overall structural correctness. Test 3 checks that `strlen` of the output equals `C_UUID_STRLEN` (36), directly exercising the ENSURES postcondition of `generate_random_uuid`. Test 4 checks that the character at offset 14 of the output is '4': in the `snprintf` format string `"%02x%02x%02x%02x-%02x%02x-%02x%02x-..."`, bytes 0-3 occupy offsets 0-7, the first hyphen sits at offset 8, bytes 4-5 occupy offsets 9-12, the second hyphen sits at offset 13, and byte 6 begins at offset 14; because `generate_random_uuid` applies `uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x40U` before formatting, the high nibble of byte 6 is always 0x4 and the character at offset 14 is always '4'. Test 5 checks that the character at offset 19 is '8', '9', 'a', or 'b': the third hyphen sits at offset 18 and byte 8 begins at offset 19; because `generate_random_uuid` applies `uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80U` before formatting, the high nibble of byte 8 is always 0x8, 0x9, 0xA, or 0xB, and the `%02x` directive produces '8', '9', 'a', or 'b' at offset 19.
+
+Six tests are provided for `is_valid_uuid` and five for `generate_random_uuid`, for a total of eleven tests.
+*/
+
+/*
+## is_valid_uuid test 1
+
+Tests that `is_valid_uuid` returns true for a well-formed all-lowercase UUID. The string "550e8400-e29b-41d4-a716-446655440000" is 36 bytes, carries hyphens at offsets 8, 13, 18, and 23, and has lowercase hexadecimal digits at every other position. It exercises the happy path with the most common input form.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+
+*/
+
+    void is_valid_uuid_test_1(void)
+    {
+        bool result = false;
+
+        result = is_valid_uuid("550e8400-e29b-41d4-a716-446655440000");
+        ASSERT(true == result, "Expected is_valid_uuid to return true for a valid lowercase UUID, got false");
+    }
+
+/*
+## is_valid_uuid test 2
+
+Tests that `is_valid_uuid` returns true for a well-formed all-uppercase UUID. The string "550E8400-E29B-41D4-A716-446655440000" is 36 bytes, carries hyphens at offsets 8, 13, 18, and 23, and has uppercase hexadecimal digits at every other position. Together with test 1 it verifies that `isxdigit` accepts both letter cases.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+
+*/
+
+    void is_valid_uuid_test_2(void)
+    {
+        bool result = false;
+
+        result = is_valid_uuid("550E8400-E29B-41D4-A716-446655440000");
+        ASSERT(true == result, "Expected is_valid_uuid to return true for a valid uppercase UUID, got false");
+    }
+
+/*
+## is_valid_uuid test 3
+
+Tests that `is_valid_uuid` returns true for the RFC 4122 nil UUID. The string "00000000-0000-0000-0000-000000000000" is 36 bytes composed entirely of the digit '0', with hyphens at offsets 8, 13, 18, and 23. It is the boundary case in which every hex position holds a digit rather than a letter, and it is the only UUID whose bit pattern is all zeros.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+
+*/
+
+    void is_valid_uuid_test_3(void)
+    {
+        bool result = false;
+
+        result = is_valid_uuid("00000000-0000-0000-0000-000000000000");
+        ASSERT(true == result, "Expected is_valid_uuid to return true for the nil UUID, got false");
+    }
+
+/*
+## is_valid_uuid test 4
+
+Tests that `is_valid_uuid` returns false for a UUID string that is one byte too short. The string "550e8400-e29b-41d4-a716-44665544000" is 35 bytes. The length check `C_UUID_STRLEN != strlen(uuid_value)` fires before any character inspection and causes an immediate return of false.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+
+*/
+
+    void is_valid_uuid_test_4(void)
+    {
+        bool result = false;
+
+        result = is_valid_uuid("550e8400-e29b-41d4-a716-44665544000");
+        ASSERT(false == result, "Expected is_valid_uuid to return false for a 35-byte string, got true");
+    }
+
+/*
+## is_valid_uuid test 5
+
+Tests that `is_valid_uuid` returns false when a hex position contains a non-hexadecimal character. The string "550e8400-e29b-41d4-a716-44665544000g" is 36 bytes with 'g' at offset 35. Because 'g' is not a hexadecimal digit, `isxdigit((unsigned char) 'g')` returns zero at that position and the function returns false.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+
+*/
+
+    void is_valid_uuid_test_5(void)
+    {
+        bool result = false;
+
+        result = is_valid_uuid("550e8400-e29b-41d4-a716-44665544000g");
+        ASSERT(false == result, "Expected is_valid_uuid to return false for a string with a non-hex character, got true");
+    }
+
+/*
+## is_valid_uuid test 6
+
+Tests that `is_valid_uuid` returns false when a required hyphen position contains a digit. The string "550e84000e29b-41d4-a716-446655440000" is 36 bytes with '0' at offset 8 in place of the required '-'. The hyphen check `'-' != uuid_value[C_UUID_HYPHEN_1]` fires at offset 8 and causes the function to return false.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- None.
+
+*/
+
+    void is_valid_uuid_test_6(void)
+    {
+        bool result = false;
+
+        result = is_valid_uuid("550e84000e29b-41d4-a716-446655440000");
+        ASSERT(false == result, "Expected is_valid_uuid to return false for a string with a digit at a hyphen position, got true");
+    }
+
+/*
+## generate_random_uuid test 1
+
+Tests that `generate_random_uuid` returns 0 on success. A buffer of `C_UUID_LEN` bytes is provided, `generate_random_uuid` is called, and the return value is compared against 0 (the value of C_SUCCESS defined in the implementation). A non-zero return would indicate that `/dev/urandom` could not be opened or read.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- Reads 16 bytes from /dev/urandom via generate_random_uuid.
+
+*/
+
+    void generate_random_uuid_test_1(void)
+    {
+        char    uuid_buffer[C_UUID_LEN] = {0};
+        int32_t result = 0;
+
+        result = generate_random_uuid(uuid_buffer);
+        ASSERT(0 == result, "Expected generate_random_uuid to return 0, got %d", result);
+    }
+
+/*
+## generate_random_uuid test 2
+
+Tests that the UUID string written by `generate_random_uuid` passes `is_valid_uuid`. A buffer of `C_UUID_LEN` bytes is filled by `generate_random_uuid` and then passed to `is_valid_uuid`. A true result confirms that the output is a well-formed 36-byte string with hyphens at the four required positions and hexadecimal digits at every other position.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- Reads 16 bytes from /dev/urandom via generate_random_uuid.
+
+*/
+
+    void generate_random_uuid_test_2(void)
+    {
+        char    uuid_buffer[C_UUID_LEN] = {0};
+        bool    result = false;
+        int32_t status = 0;
+
+        status = generate_random_uuid(uuid_buffer);
+        ASSERT(0 == status, "Expected generate_random_uuid to succeed, got %d", status);
+        result = is_valid_uuid(uuid_buffer);
+        ASSERT(true == result, "Expected generated UUID to pass is_valid_uuid, got false");
+    }
+
+/*
+## generate_random_uuid test 3
+
+Tests that the UUID string written by `generate_random_uuid` has length `C_UUID_STRLEN`. `strlen` of the output buffer must equal `C_UUID_STRLEN` (36). This directly exercises the ENSURES postcondition `C_UUID_STRLEN == strlen(uuid_value)` that `generate_random_uuid` checks before returning.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- Reads 16 bytes from /dev/urandom via generate_random_uuid.
+
+*/
+
+    void generate_random_uuid_test_3(void)
+    {
+        char    uuid_buffer[C_UUID_LEN] = {0};
+        int32_t status = 0;
+
+        status = generate_random_uuid(uuid_buffer);
+        ASSERT(0 == status, "Expected generate_random_uuid to succeed, got %d", status);
+        ASSERT(C_UUID_STRLEN == uint32_from_size(strlen(uuid_buffer)), "Expected UUID string length %u, got %u", C_UUID_STRLEN, uint32_from_size(strlen(uuid_buffer)));
+    }
+
+/*
+## generate_random_uuid test 4
+
+Tests that the character at offset 14 of the generated UUID string is '4', confirming that the version-4 bit mask was applied. `generate_random_uuid` sets `uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x40U` before formatting; the high nibble of byte 6 is therefore always 0x4, and the `%02x` directive for byte 6 always places '4' at offset 14 of the output string.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- Reads 16 bytes from /dev/urandom via generate_random_uuid.
+
+*/
+
+    void generate_random_uuid_test_4(void)
+    {
+        char    uuid_buffer[C_UUID_LEN] = {0};
+        int32_t status = 0;
+
+        status = generate_random_uuid(uuid_buffer);
+        ASSERT(0 == status, "Expected generate_random_uuid to succeed, got %d", status);
+        ASSERT('4' == uuid_buffer[14], "Expected version nibble '4' at offset 14, got '%c'", uuid_buffer[14]);
+    }
+
+/*
+## generate_random_uuid test 5
+
+Tests that the character at offset 19 of the generated UUID string is '8', '9', 'a', or 'b', confirming that the variant-1 bit mask was applied. `generate_random_uuid` sets `uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80U` before formatting; the high nibble of byte 8 is therefore always 0x8, 0x9, 0xA, or 0xB, and the `%02x` directive for byte 8 always places one of '8', '9', 'a', or 'b' at offset 19 of the output string.
+
+### Interactions
+
+| Parameter | Direction | Type | Description      |
+| --------- | --------- | ---- | ---------------- |
+| return    | out       | void | No return value. |
+
+Other changes to system state include:
+
+- Reads 16 bytes from /dev/urandom via generate_random_uuid.
+
+*/
+
+    void generate_random_uuid_test_5(void)
+    {
+        char    uuid_buffer[C_UUID_LEN] = {0};
+        int32_t status = 0;
+
+        status = generate_random_uuid(uuid_buffer);
+        ASSERT(0 == status, "Expected generate_random_uuid to succeed, got %d", status);
+        ASSERT(('8' == uuid_buffer[19]) || ('9' == uuid_buffer[19]) || ('a' == uuid_buffer[19]) || ('b' == uuid_buffer[19]), "Expected variant nibble '8', '9', 'a', or 'b' at offset 19, got '%c'", uuid_buffer[19]);
+    }
+
+/*
+## main
+
+Runs all eleven unit tests for `is_valid_uuid` and `generate_random_uuid` in function-number order. Each test calls ASSERT internally. `safety_abort` aborts the process if any assertion fails. A clean return of EXIT_SUCCESS therefore confirms that all eleven tests passed.
+
+### Interactions
+
+| Parameter | Direction | Type | Description                                                                |
+| --------- | --------- | ---- | -------------------------------------------------------------------------- |
+| return    | out       | int  | EXIT_SUCCESS when all assertions pass, aborts before returning on failure. |
+
+Other changes to system state include:
+
+- Reads 16 bytes from /dev/urandom per generate_random_uuid call, five calls in total, for a total of 80 bytes.
+
+*/
+
+    int main(void)
+    {
+        int exit_code = EXIT_SUCCESS;
+
+        is_valid_uuid_test_1();
+        is_valid_uuid_test_2();
+        is_valid_uuid_test_3();
+        is_valid_uuid_test_4();
+        is_valid_uuid_test_5();
+        is_valid_uuid_test_6();
+
+        generate_random_uuid_test_1();
+        generate_random_uuid_test_2();
+        generate_random_uuid_test_3();
+        generate_random_uuid_test_4();
+        generate_random_uuid_test_5();
+
+        return(exit_code);
+    }
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>

@@ -3,7 +3,7 @@ LDFLAGS += -rdynamic
 LDLIBS  += -lm
 
 TARGET      = hxi-snond gpm8310-snond
-TESTS       = asdfg-c-types-test
+TESTS       = asdfg-c-types-tests asdfg-c-uuid-tests
 SHARED_OBJS = asdfg-c-dbc.o asdfg-c-types.o asdfg-c-uuid.o
 HXI_OBJS    = hxi-snond.o hxi-config.o cJSON.o $(SHARED_OBJS)
 GPM_OBJS    = gpm8310-snond.o cJSON.o $(SHARED_OBJS)
