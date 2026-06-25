@@ -70,56 +70,58 @@ section 7.4.3.
     #define C_ISO8601_LEN               28U         // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
         
     // HXi HID device identifiers
-    #define C_HXI_VENDOR_ID             0x1b1cU     // Corsair USB vendor identifier
-    #define C_HXI_PRODUCT_ID            0x1c1eU     // HX1000i USB product identifier
+    #define C_HXI_VENDOR_ID             0x1b1cU         // Corsair USB vendor identifier
+    #define C_HXI_PRODUCT_ID            0x1c1eU         // HX1000i USB product identifier
     
     // HXi HID packet layout
-    #define C_HXI_PACKET_LEN            64U         // All HID packets are 64 bytes
-    #define C_HXI_RAIL_CMD_LEN          0x02U       // Length byte in a rail-select packet
-    #define C_HXI_RAIL_SEL_CMD          0x00U       // Command byte: select output rail
-    #define C_HXI_RAIL_OK               0x00U       // Response status byte: success
-    #define C_HXI_PWR_CMD_LEN           0x03U       // Length byte in a power-read packet
+    #define C_HXI_PACKET_LEN            64U             // All HID packets are 64 bytes
+    #define C_HXI_RAIL_CMD_LEN          0x02U           // Length byte in a rail-select packet
+    #define C_HXI_RAIL_SEL_CMD          0x00U           // Command byte: select output rail
+    #define C_HXI_RAIL_OK               0x00U           // Response status byte: success
+    #define C_HXI_PWR_CMD_LEN           0x03U           // Length byte in a power-read packet
     
     // HXi output rail indices
-    #define C_HXI_RAIL_3V3              0U          // 3.3 V output rail index
-    #define C_HXI_RAIL_5V               1U          // 5 V output rail index
-    #define C_HXI_RAIL_12V              2U          // 12 V output rail index
+    #define C_HXI_RAIL_3V3              0U              // 3.3 V output rail index
+    #define C_HXI_RAIL_5V               1U              // 5 V output rail index
+    #define C_HXI_RAIL_12V              2U              // 12 V output rail index
     
     // PMBus LINEAR11 register field constants
-    #define C_L11_EXP_SHIFT             11U         // Bit position of the 5-bit exponent field
-    #define C_L11_MANT_MASK             0x07FFU     // Mask for the 11-bit mantissa field [10:0]
-    #define C_L11_EXP_SIGN_BIT          0x10U       // Sign bit within the 5-bit exponent (bit 4)
-    #define C_L11_EXP_SEXT_MASK         0xFFE0U     // Sign-extension mask for a 5-bit exponent
-    #define C_L11_MANT_SIGN_BIT         0x0400U     // Sign bit within the 11-bit mantissa (bit 10)
-    #define C_L11_MANT_SEXT_MSK         0xFFFFF800U // Sign-extension mask for 11-bit mantissa
+    #define C_L11_EXP_SHIFT             11U             // Bit position of the 5-bit exponent field
+    #define C_L11_MANT_MASK             0x07FFU         // Mask for the 11-bit mantissa field [10:0]
+    #define C_L11_EXP_SIGN_BIT          0x10U           // Sign bit within the 5-bit exponent (bit 4)
+    #define C_L11_EXP_SEXT_MASK         0xFFE0U         // Sign-extension mask for a 5-bit exponent
+    #define C_L11_MANT_SIGN_BIT         0x0400U         // Sign bit within the 11-bit mantissa (bit 10)
+    #define C_L11_MANT_SEXT_MSK         0xFFFFF800U     // Sign-extension mask for 11-bit mantissa
     
     // Polling interval for hxi_collect_values
-    #define C_POLL_INTERVAL_NS          100000000L  // 100 ms in nanoseconds (type int, assigned to long tv_nsec)
-    #define C_NS_PER_SECOND             1000000000  // 1 s in nanoseconds
+    #define C_POLL_INTERVAL_NS          100000000L      // 100 ms in nanoseconds (type int, assigned to long tv_nsec)
+    #define C_NS_PER_SECOND             1000000000      // 1 s in nanoseconds
 
     // SNON JSON field keys
-    #define C_SNON_EID_KEY              "eID"       // SNON entity identifier field key
-    #define C_SNON_EC_KEY               "eC"        // SNON entity class field key
-    #define C_SNON_EN_KEY               "eN"        // SNON entity name field key
-    #define C_SNON_ER_KEY               "eR"        // SNON entity relation field key
-    #define C_SNON_LANG_DEFAULT         "*"         // SNON wildcard language tag for default name
-    #define C_SNON_SENSOR_CLASS         "sensor"    // SNON entity class value for sensor records
-    #define C_SNON_CHILD_OF_KEY         "child_of"  // SNON relation key linking a sensor to its device
-
+    #define C_SNON_EID_KEY              "eID"           // SNON entity identifier field key
+    #define C_SNON_EC_KEY               "eC"            // SNON entity class field key
+    #define C_SNON_EN_KEY               "eN"            // SNON entity name field key
+    #define C_SNON_ER_KEY               "eR"            // SNON entity relation field key
+    #define C_SNON_LANG_DEFAULT         "*"             // SNON wildcard language tag for default name
+    #define C_SNON_SENSOR_CLASS         "sensor"        // SNON entity class value for sensor records
+    #define C_SNON_CHILD_OF_KEY         "child_of"      // SNON relation key linking a sensor to its device
+    #define C_SNON_SERIES_CLASS         "series"        // SNON entity class value for series records
+    
     // SNON URN constants
-    #define C_URN_UUID_PREFIX           "urn:uuid:" // URN prefix prepended to each entity UUID
-    #define C_URN_UUID_PREFIX_LEN       9U          // Byte length of C_URN_UUID_PREFIX (no null)
-    #define C_SNON_EID_LEN              46U         // Buffer size for "urn:uuid:<UUID>\0" (9 + 36 + 1)
+    #define C_URN_UUID_PREFIX           "urn:uuid:"     // URN prefix prepended to each entity UUID
+    #define C_URN_UUID_PREFIX_LEN       9U              // Byte length of C_URN_UUID_PREFIX (no null)
+    #define C_SNON_EID_LEN              46U             // Buffer size for "urn:uuid:<UUID>\0" (9 + 36 + 1)
 
     // Config JSON field keys
-    #define C_CONFIG_REGISTER_KEY       "register"  // Per-sensor key for the register to read data from
-    #define C_CONFIG_RAIL_KEY           "rail"      // Per-sensor key for the rail to read data from
-    #define C_CONFIG_UUID_KEY           "uuid"      // Per-sensor key added to hold the SNON UUID
+    #define C_CONFIG_REGISTER_KEY       "register"      // Per-sensor key for the register to read data from
+    #define C_CONFIG_RAIL_KEY           "rail"          // Per-sensor key for the rail to read data from
+    #define C_CONFIG_UUID_KEY           "uuid"          // Per-sensor key added to hold the SNON UUID
+    #define C_CONFIG_SERIES_UUID_KEY    "series_uuid"   // Per-sensor key added to hold the SNON series UUID
 
     // Miscellaneous
-    #define C_JSON_EXT                  ".json"     // JSON file extension string
-    #define C_JSON_EXT_LEN              5U          // Byte length of C_JSON_EXT (no null)
-    #define C_SENSOR_NAME_MAX_LEN       256U        // Maximum buffer length for a sensor name string
+    #define C_JSON_EXT                  ".json"         // JSON file extension string
+    #define C_JSON_EXT_LEN              5U              // Byte length of C_JSON_EXT (no null)
+    #define C_SENSOR_NAME_MAX_LEN       256U            // Maximum buffer length for a sensor name string
 
 /*
 ### Sensor collection state
@@ -138,6 +140,7 @@ expected config file.
         uint32_t    register_id;
         bool        first_record;
         char        sensor_uuid[C_UUID_LEN];
+        char        series_uuid[C_UUID_LEN];
         char        snon_path[PATH_MAX];
         int32_t     snon_fd;
         cJSON*      snon_array;
@@ -154,6 +157,9 @@ Local functions
     int32_t hxi_config_json_validate(cJSON* config_json);
     int32_t hxi_create_snon_definitions(cJSON* config_json, const char* snon_path, char* device_uuid);
     int32_t hxi_create_sensor_record(const char* snon_path, const char* device_uuid, const char* sensor_name, char* sensor_uuid_out);
+    int32_t hxi_create_series_record(const char* snon_path, const char* sensor_uuid, const char* sensor_name, char* series_uuid_out);
+    int32_t hxi_config_add_series_uuid(cJSON* config_json, const char* sensor_name, const char* series_uuid);
+    int32_t hxi_load_series_uuids(cJSON* config_json, const char* snon_path);
     int32_t hxi_collect_values(cJSON* config_json, const char* snon_path, int32_t dev_fd);
     uint32_t hxi_build_snon_entry(sensor_state_t* sensor, double sen_value, const char* timestamp);
     int32_t hxi_read_power(int32_t dev_fd, uint8_t register_id, double* sen_value);
@@ -216,8 +222,8 @@ The daemon runs until it receives a SIGINT signal, at which point the signal han
 
 Other changes to system state include:
 
-- May create up to two new JSON files in the output directory (device record and sensor record).
-- May create one new subdirectory in the output directory (sensor value directory).
+- May create multiple JSON files in the SNON directory (device, sensor, series, and value entities).
+- May create multiple new subdirectories in the SNON directory (sensor, series, and values directories).
 - Opens and closes a file descriptor for the HID raw device specified by -d.
 - Reads the JSON configuration file from the path specified by -c.
 - Scans the output directory for SNON sensor definition records and populates sensor UUIDs into the in-memory config object via hxi_load_sensor_uuids.
@@ -395,12 +401,22 @@ Other changes to system state include:
             close(dev_fd);
             return(EXIT_FAILURE);
         }
-         
+
+        // ===========================================================
+        // Load series UUIDs from the sensors/<S>/series/ symlink directories (Section 8.9)
+        if(C_FAILURE == hxi_load_series_uuids(config_json, snon_path))
+        {
+            fprintf(stderr, "Error loading series UUIDs from SNON definition records\n");
+            cJSON_Delete(config_json);
+            close(dev_fd);
+            return(EXIT_FAILURE);
+        }
+
         // ===========================================================
         // Obtain HXi Power Supply Information
-        if(C_FAILURE == hxi_collect_values(config_json, snon_dpath, dev_fd))
+        if(C_FAILURE == hxi_collect_values(config_json, snon_path, dev_fd))
         {
-            fprintf(stderr, "Error writing SNON value record\n");
+            fprintf(stderr, "Error writing SNON series value record\n");
             cJSON_Delete(config_json);
             close(dev_fd);
             return(EXIT_FAILURE);
@@ -414,11 +430,10 @@ Other changes to system state include:
 int32_t snon_validate_dir(const char* snon_path, int32_t mode)
 {
     int32_t             return_status = C_SUCCESS;
-    char                sub_path[PATH_MAX];
-    int32_t             path_len;
-    int32_t             idx;
-    const char*         subdirs[] = { "devices", "locations", "measurands",
-                                      "sensors",  "series",    NULL };
+    char                sub_path[PATH_MAX] = {0};
+    int32_t             path_len = 0;
+    int32_t             index = 0;
+    const char*         subdirs[] = { "devices", "locations", "measurands", "sensors",  "series", NULL };
 
     // Ensure that the SNON directory ends with a "/"
     if('/' != snon_path[strlen(snon_path) - 1])
@@ -453,12 +468,12 @@ int32_t snon_validate_dir(const char* snon_path, int32_t mode)
     }
 
     // Create each required entity class subdirectory if it does not already exist
-    for(idx = 0; (NULL != subdirs[idx]) && (C_SUCCESS == return_status); idx++)
+    while((NULL != subdirs[index]) && (C_SUCCESS == return_status))
     {
-        path_len = snprintf(sub_path, sizeof(sub_path), "%s%s", snon_path, subdirs[idx]);
+        path_len = snprintf(sub_path, sizeof(sub_path), "%s%s", snon_path, subdirs[index]);
         if(path_len >= (int32_t)sizeof(sub_path))
         {
-            fprintf(stderr, "SNON subdirectory path too long: %s%s\n", snon_path, subdirs[idx]);
+            fprintf(stderr, "SNON subdirectory path too long: %s%s\n", snon_path, subdirs[index]);
             return_status = C_FAILURE;
         }
         if(C_SUCCESS == return_status)
@@ -473,6 +488,8 @@ int32_t snon_validate_dir(const char* snon_path, int32_t mode)
                 }
             }
         }
+        
+        index = index + 1;
     }
 
     return(return_status);
@@ -490,6 +507,9 @@ Creates SNON 4.0 filesystem artefacts for a device and one sensor per entry in c
    b. A sensor canonical subdirectory at sensors/<sensor_uuid>/, with subdirectories values/ and series/ (Sections 8.5, 8.9).
    c. A measurand fragment at measurands/<measurand_uuid>.json if no measurand with a matching name already exists (Section 8.10).
    d. A relative symlink pair in devices/<device_uuid>/sensors/ pointing to the new sensor's canonical file and directory (Section 8.7.1).
+   e. A series canonical fragment file at series/<series_uuid>.json, containing a JSON array with the series entity including eR.child_of (sensor) and eR.measurand (Section 8.9).
+   f. A series canonical subdirectory at series/<series_uuid>/, with a values/ subdirectory (Sections 8.5, 8.6).
+   g. A relative symlink pair in sensors/<sensor_uuid>/series/ pointing to the series canonical file and directory (Section 8.7.1).
 
 ### Interactions
 
@@ -515,6 +535,7 @@ Other changes to system state include:
         cJSON*      device_obj = NULL;
         cJSON*      sensor_entry = NULL;
         char        sensor_uuid[C_UUID_LEN] = {0};
+        char        series_uuid[C_UUID_LEN] = {0};
         char        working_string[1024] = {0};
         char*       snon_output = NULL;
         size_t      output_len = 0U;
@@ -634,6 +655,26 @@ Other changes to system state include:
                         snprintf(rel_dir_target, sizeof(rel_dir_target), "../../../sensors/%s", sensor_uuid);
 
                         return_status = hxi_create_symlink_pair(link_dir, sensor_uuid, rel_file_target, rel_dir_target);
+                    }
+
+                    // Create a series entity for this sensor and link it from sensors/<S>/series/
+                    // (Section 8.9; symlink paths follow Section 8.7.1, row sensors/<S>/series/ -> series/<SR>)
+                    if(C_SUCCESS == return_status)
+                    {
+                        return_status = hxi_create_series_record(snon_path, sensor_uuid, sensor_entry->string, series_uuid);
+                    }
+
+                    if(C_SUCCESS == return_status)
+                    {
+                        snprintf(link_dir, sizeof(link_dir), "%ssensors/%s/series/", snon_path, sensor_uuid);
+                        snprintf(rel_file_target, sizeof(rel_file_target), "../../../series/%s.json", series_uuid);
+                        snprintf(rel_dir_target, sizeof(rel_dir_target), "../../../series/%s", series_uuid);
+                        return_status = hxi_create_symlink_pair(link_dir, series_uuid, rel_file_target, rel_dir_target);
+                    }
+
+                    if(C_SUCCESS == return_status)
+                    {
+                        return_status = hxi_config_add_series_uuid(config_json, sensor_entry->string, series_uuid);
                     }
                 }
 
@@ -789,6 +830,148 @@ Other changes to system state include:
         {
             strncpy(sensor_uuid_out, sensor_uuid, C_UUID_LEN - 1U);
             sensor_uuid_out[C_UUID_LEN - 1U] = '\0';
+        }
+
+        return(return_status);
+    }
+
+/*
+## hxi_create_series_record
+
+Creates SNON 4.0 filesystem artefacts for a single series entity linked to a sensor: a canonical fragment file, a canonical subdirectory with a values/ child, and a measurand reference (resolved via hxi_ensure_measurand). The series UUID generated internally is returned via series_uuid_out so the caller can place symlinks in the parent sensor's series/ directory.
+
+### Interactions
+
+| Parameter      | Direction | Type        | Description                                                                |
+| -------------- | --------- | ----------- | -------------------------------------------------------------------------- |
+| snon_path      | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.                       |
+| sensor_uuid    | in        | const char* | UUID string identifying the parent sensor. Must not be NULL or empty.      |
+| sensor_name    | in        | const char* | Human-readable name for eN and measurand lookup. Must not be NULL.         |
+| series_uuid_out| out       | char*       | Receives the generated series UUID. Must not be NULL. Buffer must be at    |
+|                |           |             | least C_UUID_LEN bytes.                                                    |
+
+Other changes to system state include:
+
+- Creates series/<series_uuid>.json: a JSON array containing the series fragment with eID, eC ("series"), eN, eR.child_of (sensor), and eR.measurand.
+- Creates series/<series_uuid>/ and series/<series_uuid>/values/ (Sections 8.5, 8.6).
+- May create measurands/<measurand_uuid>.json if no measurand matching sensor_name exists (Section 8.10).
+
+*/
+    int32_t hxi_create_series_record(const char* snon_path, const char* sensor_uuid, const char* sensor_name, char* series_uuid_out)
+    {
+        char        snon_fpath[PATH_MAX] = {0};
+        char        snon_dpath[PATH_MAX] = {0};
+        int32_t     snon_fd = C_FAILURE;
+        cJSON*      snon_root = NULL;
+        cJSON*      series_obj = NULL;
+        cJSON*      relation_object = NULL;
+        cJSON*      relation_array = NULL;
+        char        series_uuid[C_UUID_LEN] = {0};
+        char        measurand_uuid[C_UUID_LEN] = {0};
+        char        working_string[1024] = {0};
+        char*       snon_output = NULL;
+        size_t      output_len = 0U;
+        ssize_t     bytes_written = 0;
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != snon_path, "snon_path is NULL");
+        REQUIRES(NULL != sensor_uuid, "sensor_uuid is NULL");
+        REQUIRES(is_valid_uuid(sensor_uuid), "sensor_uuid is not valid");
+        REQUIRES(NULL != sensor_name, "sensor_name is NULL");
+        REQUIRES(NULL != series_uuid_out, "series_uuid_out is NULL");
+
+        // Generate a new UUID for this series entity
+        if(C_FAILURE == generate_random_uuid(series_uuid))
+        {
+            fprintf(stderr, "Error generating random UUID for series '%s'\n", sensor_name);
+            return_status = C_FAILURE;
+        }
+
+        // Resolve the measurand for this series; hxi_ensure_measurand is idempotent (Section 8.10)
+        if(C_SUCCESS == return_status)
+        {
+            return_status = hxi_ensure_measurand(snon_path, sensor_name, measurand_uuid);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            // Create the series canonical fragment file with O_EXCL (Section 8.5, 8.11)
+            snprintf(snon_fpath, sizeof(snon_fpath), "%sseries/%s.json", snon_path, series_uuid);
+            snon_fd = int32_from_int(open(snon_fpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+            if(C_FAILURE == snon_fd)
+            {
+                fprintf(stderr, "Error creating SNON series record file: %s\n", snon_fpath);
+                perror("open");
+                return_status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            // Build the series fragment and wrap it in an array (Section 8.5)
+            snon_root = cJSON_CreateArray();
+            ASSERT(NULL != snon_root, "cJSON_CreateArray() returned NULL; memory exhausted");
+
+            series_obj = cJSON_CreateObject();
+            ASSERT(NULL != series_obj, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", series_uuid);
+            cJSON_AddItemToObjectCS(series_obj, "eID", cJSON_CreateString(working_string));
+            cJSON_AddItemToObjectCS(series_obj, "eC",  cJSON_CreateString(C_SNON_SERIES_CLASS));
+            snon_addname(series_obj, "eN", "*", sensor_name);
+
+            // eR: child_of the parent sensor (Section 8.9) and measurand reference (Section 8.10)
+            relation_array = cJSON_CreateArray();
+            ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", sensor_uuid);
+            cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+
+            relation_object = cJSON_CreateObject();
+            ASSERT(NULL != relation_object, "cJSON_CreateObject() returned NULL; memory exhausted");
+            cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
+
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", measurand_uuid);
+            cJSON_AddItemToObjectCS(relation_object, "measurand", cJSON_CreateString(working_string));
+
+            cJSON_AddItemToObjectCS(series_obj, "eR", relation_object);
+            cJSON_AddItemToArray(snon_root, series_obj);
+
+            snon_output = cJSON_PrintUnformatted(snon_root);
+            ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
+
+            output_len = strlen(snon_output);
+            bytes_written = write(snon_fd, snon_output, output_len);
+
+            // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t; safe because bytes_written is checked for < 0 first
+            if((bytes_written < 0) || ((size_t)bytes_written != output_len))
+            {
+                fprintf(stderr, "Error writing SNON series record\n");
+                perror("write");
+                return_status = C_FAILURE;
+            }
+
+            cJSON_free(snon_output);
+            cJSON_Delete(snon_root);
+            close(snon_fd);
+        }
+
+        // Create the series canonical subdirectory and its values/ child (Sections 8.5, 8.6)
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sseries/%s", snon_path, series_uuid);
+            return_status = hxi_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sseries/%s/values", snon_path, series_uuid);
+            return_status = hxi_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            strncpy(series_uuid_out, series_uuid, C_UUID_LEN - 1U);
+            series_uuid_out[C_UUID_LEN - 1U] = '\0';
         }
 
         return(return_status);
@@ -970,7 +1153,7 @@ Other changes to system state include:
                     entry_len = strlen(dir_entry->d_name);
 
                     // Only inspect files with the .json extension; skip dotfiles
-                    if((entry_len > 5U) && (0 == strcmp(dir_entry->d_name + entry_len - 5U, ".json")))
+                    if((entry_len > 5U) && (0 == strcmp(dir_entry->d_name + entry_len - C_JSON_EXT_LEN, C_JSON_EXT)))
                     {
                         snprintf(candidate_path, sizeof(candidate_path), "%s%s", measurands_dir, dir_entry->d_name);
 
@@ -1230,18 +1413,18 @@ Other changes to system state include:
 /*
 ## Load sensor state from the config JSON
 
-Iterates every top-level entry of `config_json` and populates one `sensor_state_t` record per entry into `sensors`. The snon_path for each sensor embeds `snon_path`, the entry UUID, and `timestamp`. Returns `C_FAILURE` on the first entry lacking a valid `"register"` or `"uuid"` field; the loop exits immediately and `sensor_count_out` reflects the count of valid entries written before the error.
+Iterates every top-level entry of `config_json` and populates one `sensor_state_t` record per entry into `sensors`. The snon_path for each sensor embeds snon_path, the entry series_uuid, and timestamp, placing value files under series/<series_uuid>/values/ (Section 8.6). Returns C_FAILURE on the first entry lacking a valid "register", "uuid", or "series_uuid" field.
 
 ### Interactions
 
 | Parameter        | Direction | Type            | Description                                                              |
 | ---------------- | --------- | --------------- | ------------------------------------------------------------------------ |
 | config_json      | in        | cJSON*          | UUID-populated config object                                             |
-| snon_path        | in        | const char*     | Base directory under which sensor record files will be created           |
+| snon_path        | in        | const char*     | SNON root path. Must not be NULL. Must end with '/'.                     |
 | timestamp        | in        | const char*     | ISO 8601 string embedded in each sensor output file name                 |
 | sensors          | out       | sensor_state_t* | Caller-allocated array of at least C_MAX_SENSORS records to populate     |
 | sensor_count_out | out       | uint32_t*       | Set to the number of valid entries written into sensors                  |
-| return value     | out       | int32_t         | 0 on success; -1 if any entry is missing a valid "register" or "uuid" field  |
+| return value     | out       | int32_t         | 0 on success; -1 if any entry is missing a valid "register", "uuid", or "series_uuid" field |
 
 Other changes to system state include:
 
@@ -1254,6 +1437,7 @@ Other changes to system state include:
         cJSON*      rail_item = NULL;
         cJSON*      register_item = NULL;
         cJSON*      uuid_item = NULL;
+        cJSON*      series_uuid_item = NULL;
         uint32_t    count = 0U;
         uint32_t    rail_parsed = 0;
         uint32_t    register_parsed = 0;
@@ -1267,13 +1451,14 @@ Other changes to system state include:
 
         config_entry = config_json->child;
 
-        while(NULL != config_entry)
+while(NULL != config_entry)
         {
             ASSERT(count < C_MAX_SENSORS, "Sensor count exceeds C_MAX_SENSORS (%u)", C_MAX_SENSORS);
 
-            register_item = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_REGISTER_KEY);
-            rail_item = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_RAIL_KEY);
-            uuid_item = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_UUID_KEY);
+            register_item    = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_REGISTER_KEY);
+            rail_item        = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_RAIL_KEY);
+            uuid_item        = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_UUID_KEY);
+            series_uuid_item = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_SERIES_UUID_KEY);
 
             if(NULL == register_item || false == cJSON_IsString(register_item))
             {
@@ -1289,18 +1474,25 @@ Other changes to system state include:
                 config_entry = NULL;
             }
 
+            if(NULL == series_uuid_item || false == cJSON_IsString(series_uuid_item))
+            {
+                fprintf(stderr, "Config entry missing valid \"%s\" field\n", C_CONFIG_SERIES_UUID_KEY);
+                return_status = C_FAILURE;
+                config_entry = NULL;
+            }
+
             if(NULL != rail_item && false == cJSON_IsString(rail_item))
             {
                 fprintf(stderr, "Invalid \"%s\" field\n", C_CONFIG_RAIL_KEY);
                 return_status = C_FAILURE;
                 config_entry = NULL;
             }
-            
+
             if(C_FAILURE != return_status)
             {
                 if(NULL != rail_item)
                 {
-                    // ASDFG-C 6.35 VIOLATION: strtol return value cast to uint8_t; safe because rail identifiers are small positive integers
+                    // ASDFG-C 6.35 VIOLATION: strtol return value cast to uint32_t; safe because rail identifiers are small positive integers
                     rail_parsed = strtol(rail_item->valuestring, NULL, 10);
                 }
 
@@ -1308,18 +1500,26 @@ Other changes to system state include:
 
                 if(NULL != register_item)
                 {
-                    // ASDFG-C 6.35 VIOLATION: strtol return value cast to uint8_t; safe because register identifiers are small positive integers
+                    // ASDFG-C 6.35 VIOLATION: strtol return value cast to uint32_t; safe because register identifiers are small positive integers
                     register_parsed = strtol(register_item->valuestring, NULL, 10);
                 }
-                
+
                 sensors[count].register_id = (uint32_t) register_parsed;
                 sensors[count].first_record = true;
                 sensors[count].snon_fd = -1;
                 sensors[count].snon_array = NULL;
-                strncpy(sensors[count].sensor_uuid, uuid_item->valuestring, C_UUID_LEN - 1U);
-                snprintf(sensors[count].snon_path, sizeof(sensors[count].snon_path), "%s%s/values/%s.json", snon_path, sensors[count].sensor_uuid, timestamp);
 
-                // Switch out ISO 8601 ':' for '-' to be file system safe
+                strncpy(sensors[count].sensor_uuid, uuid_item->valuestring, C_UUID_LEN - 1U);
+                sensors[count].sensor_uuid[C_UUID_LEN - 1U] = '\0';
+
+                strncpy(sensors[count].series_uuid, series_uuid_item->valuestring, C_UUID_LEN - 1U);
+                sensors[count].series_uuid[C_UUID_LEN - 1U] = '\0';
+
+                // Value files are written under the series entity, not the sensor (Sections 8.6, 8.9)
+                snprintf(sensors[count].snon_path, sizeof(sensors[count].snon_path),
+                         "%sseries/%s/values/%s.json", snon_path, sensors[count].series_uuid, timestamp);
+
+                // Switch out ISO 8601 ':' for '-' to be filesystem safe (Section 8.6)
                 string_replace_char(sensors[count].snon_path, ':', '-');
 
                 count = count + 1U;
@@ -1343,7 +1543,7 @@ Returns NULL if object allocation fails.
 
 | Parameter    | Direction | Type            | Description                                                           |
 | ------------ | --------- | --------------- | --------------------------------------------------------------------- |
-| sensor       | in        | sensor_state_t* | Sensor state; sensor_uuid is read to populate "eID".                  |
+| sensor       | in        | sensor_state_t* | Sensor state; series_uuid is read to populate "eID" (Section 8.9).    |
 | sen_value    | in        | double          | Sensor reading stored under the "v" field.                            |
 | timestamp    | in        | const char*     | ISO 8601 string stored under the "t" field.                           |
 | return value | out       | cJSON*          | Newly allocated cJSON object; NULL on allocation failure.             |
@@ -1373,7 +1573,7 @@ Other changes to system state include:
             cJSON_AddItemToArray(sensor->snon_array, entry);
 
             // Add the entity type
-            snprintf(eid_string, sizeof(eid_string), "urn:uuid:%s", sensor->sensor_uuid);
+            snprintf(eid_string, sizeof(eid_string), "urn:uuid:%s", sensor->series_uuid);
             cJSON_AddItemToObjectCS(entry, "eID", cJSON_CreateString(eid_string));
 
             // Create arrays for values and valueTimes
@@ -1592,9 +1792,9 @@ Loads per-sensor state from config_json, installs a SIGINT handler, then opens o
 | Parameter       | Direction | Type         | Description                                                              |
 | --------------- | --------- | ------------ | ------------------------------------------------------------------------ |
 | config_json     | in        | cJSON*       | UUID-populated config object; all entries are collected                  |
-| snon_path     | in        | const char*  | Base directory under which sensor record files are created               |
+| snon_path       | in        | const char*  | SNON root path. Must not be NULL. Must end with '/'.                     |
 | dev_fd          | in        | int32_t      | Open file descriptor for the HID raw device                              |
-| return value    | out       | int32_t      | 0 on success; -1 on any config, I/O, or device error                    |
+| return value    | out       | int32_t      | 0 on success; -1 on any config, I/O, or device error                     |
 | g_abort_collect | shared    | sig_atomic_t | Global flag; polled each loop iteration; written true by signal_handler  |
 
 Other changes to system state include:
@@ -2141,6 +2341,64 @@ Other changes to system state include:
     }
 
 /*
+## Add a series UUID to the matching entry in the config JSON
+
+Searches the top-level keys of config_json for a key that exactly matches sensor_name. When a match is found, a "series_uuid" string field holding series_uuid is attached to that entry's value object.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                                                    |
+| ------------ | --------- | ----------- | ------------------------------------------------------------------------------ |
+| config_json  | shared    | cJSON*      | Parsed config JSON object; the matching sensor entry is modified in place      |
+| sensor_name  | in        | const char* | Name string to search for; matched byte-for-byte against each top-level key   |
+| series_uuid  | in        | const char* | RFC 4122 UUID string to attach to the matching config entry under "series_uuid"|
+| return value | out       | int32_t     | 0 on success or no match; -1 if the matched entry's value is not a JSON object |
+
+Other changes to system state include:
+
+- Allocates heap memory via cJSON for the UUID string node. Owned by config_json.
+
+*/
+    int32_t hxi_config_add_series_uuid(cJSON* config_json, const char* sensor_name, const char* series_uuid)
+    {
+        cJSON*      sensor_entry = NULL;
+        cJSON*      uuid_item = NULL;
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != config_json, "NULL pointer passed for config_json");
+        REQUIRES(NULL != sensor_name, "NULL pointer passed for sensor_name");
+        REQUIRES(NULL != series_uuid, "NULL pointer passed for series_uuid");
+        REQUIRES(is_valid_uuid(series_uuid), "series_uuid is not a valid UUID: %s", series_uuid);
+
+        sensor_entry = config_json->child;
+
+        while(NULL != sensor_entry)
+        {
+            if(NULL != sensor_entry->string)
+            {
+                if(0 == strncmp(sensor_entry->string, sensor_name, strlen(sensor_name) + 1U))
+                {
+                    if(false == cJSON_IsObject(sensor_entry))
+                    {
+                        fprintf(stderr, "Config entry \"%s\" is not a JSON object\n", sensor_name);
+                        return_status = C_FAILURE;
+                    }
+                    else
+                    {
+                        uuid_item = cJSON_CreateString(series_uuid);
+                        ASSERT(NULL != uuid_item, "Memory allocation failed for series UUID string node");
+                        cJSON_AddItemToObjectCS(sensor_entry, C_CONFIG_SERIES_UUID_KEY, uuid_item);
+                    }
+                }
+            }
+
+            sensor_entry = sensor_entry->next;
+        }
+
+        return(return_status);
+    }
+
+/*
 ## Load and process one JSON file as a potential sensor definition
 
 Opens and parses the JSON file at `file_path`. If the result is a SNON sensor record whose `child_of` relation includes `device_uuid`, the sensor's default display name and UUID are extracted and the UUID is written into the matching entry of `config_json` by calling `hxi_config_add_sensor_uuid`.
@@ -2280,6 +2538,102 @@ Other changes to system state include:
             }
 
             closedir(dir_handle);
+        }
+
+        return(return_status);
+    }
+
+/*
+## Scan each sensor's series/ directory and load the linked series UUID into config
+
+For each config entry that already has a "uuid" field (sensor UUID), opens the directory at sensors/<sensor_uuid>/series/ and finds the first symlink whose basename is a valid UUID followed by ".json". That UUID is written into the matching config entry under "series_uuid" via hxi_config_add_series_uuid.
+
+This function handles subsequent daemon invocations where series entities were created on an earlier run and their UUIDs are not present in the on-disk config file.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                                                      |
+| ------------ | --------- | ----------- | -------------------------------------------------------------------------------- |
+| config_json  | shared    | cJSON*      | Parsed config JSON object with "uuid" fields already populated; updated in place |
+| snon_path    | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.                             |
+| return value | out       | int32_t     | 0 on success; -1 if hxi_config_add_series_uuid reports a structural config error |
+
+Other changes to system state include:
+
+- Opens and closes directory handles for each sensor's series/ subdirectory.
+
+*/
+    int32_t hxi_load_series_uuids(cJSON* config_json, const char* snon_path)
+    {
+        cJSON*          config_entry = NULL;
+        cJSON*          uuid_item = NULL;
+        char            series_dir[PATH_MAX] = {0};
+        char            candidate_uuid[C_UUID_LEN] = {0};
+        DIR*            dir_handle = NULL;
+        struct dirent*  dir_entry = NULL;
+        size_t          entry_len = 0U;
+        bool            scan_done = false;
+        int32_t         return_status = C_SUCCESS;
+
+        REQUIRES(NULL != config_json, "NULL pointer passed for config_json");
+        REQUIRES(NULL != snon_path, "NULL pointer passed for snon_path");
+
+        config_entry = config_json->child;
+
+        while((NULL != config_entry) && (C_SUCCESS == return_status))
+        {
+            uuid_item = cJSON_GetObjectItemCaseSensitive(config_entry, C_CONFIG_UUID_KEY);
+
+            if((NULL != uuid_item) && cJSON_IsString(uuid_item))
+            {
+                snprintf(series_dir, sizeof(series_dir), "%ssensors/%s/series/", snon_path, uuid_item->valuestring);
+
+                dir_handle = opendir(series_dir);
+
+                if(NULL != dir_handle)
+                {
+                    scan_done = false;
+
+                    while(false == scan_done)
+                    {
+                        dir_entry = readdir(dir_handle);
+
+                        if(NULL == dir_entry)
+                        {
+                            scan_done = true;
+                        }
+                        else
+                        {
+                            entry_len = strlen(dir_entry->d_name);
+
+                            // Series symlinks are named <uuid>.json (Section 8.7.2)
+                            if((entry_len > C_JSON_EXT_LEN) &&
+                               (0 == strcmp(dir_entry->d_name + entry_len - C_JSON_EXT_LEN, C_JSON_EXT)))
+                            {
+                                if((entry_len - C_JSON_EXT_LEN) == (C_UUID_LEN - 1U))
+                                {
+                                    strncpy(candidate_uuid, dir_entry->d_name, C_UUID_LEN - 1U);
+                                    candidate_uuid[C_UUID_LEN - 1U] = '\0';
+
+                                    if(is_valid_uuid(candidate_uuid))
+                                    {
+                                        if(C_FAILURE == hxi_config_add_series_uuid(config_json, config_entry->string, candidate_uuid))
+                                        {
+                                            return_status = C_FAILURE;
+                                        }
+
+                                        scan_done = true; // use first valid series UUID found
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    closedir(dir_handle);
+                }
+            }
+
+            config_entry = config_entry->next;
         }
 
         return(return_status);
