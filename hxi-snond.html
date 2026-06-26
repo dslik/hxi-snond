@@ -773,17 +773,22 @@ Other changes to system state include:
             snon_addname(sensor_obj, "eN", "*", sensor_name);
 
             // eR: child_of device (Section 8.9) and measurand reference (Section 8.10)
+            relation_object = cJSON_CreateObject();
+            ASSERT(NULL != relation_object, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+            // child_of: array containing the device URN
             relation_array = cJSON_CreateArray();
             ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
             cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
-
-            relation_object = cJSON_CreateObject();
-            ASSERT(NULL != relation_object, "cJSON_CreateObject() returned NULL; memory exhausted");
             cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
 
+            // measurand: also an array containing the measurand URN (not a bare string)
+            relation_array = cJSON_CreateArray();
+            ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", measurand_uuid);
-            cJSON_AddItemToObjectCS(relation_object, "measurand", cJSON_CreateString(working_string));
+            cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+            cJSON_AddItemToObjectCS(relation_object, "measurand", relation_array);
 
             cJSON_AddItemToObjectCS(sensor_obj, "eR", relation_object);
             cJSON_AddItemToArray(snon_root, sensor_obj);
@@ -921,17 +926,22 @@ Other changes to system state include:
             snon_addname(series_obj, "eN", "*", sensor_name);
 
             // eR: child_of the parent sensor (Section 8.9) and measurand reference (Section 8.10)
+            relation_object = cJSON_CreateObject();
+            ASSERT(NULL != relation_object, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+            // child_of: array containing the sensor URN
             relation_array = cJSON_CreateArray();
             ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", sensor_uuid);
             cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
-
-            relation_object = cJSON_CreateObject();
-            ASSERT(NULL != relation_object, "cJSON_CreateObject() returned NULL; memory exhausted");
             cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
 
+            // measurand: also an array containing the measurand URN (not a bare string)
+            relation_array = cJSON_CreateArray();
+            ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", measurand_uuid);
-            cJSON_AddItemToObjectCS(relation_object, "measurand", cJSON_CreateString(working_string));
+            cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+            cJSON_AddItemToObjectCS(relation_object, "measurand", relation_array);
 
             cJSON_AddItemToObjectCS(series_obj, "eR", relation_object);
             cJSON_AddItemToArray(snon_root, series_obj);
@@ -1535,7 +1545,7 @@ while(NULL != config_entry)
 /*
 ## hxi_build_snon_entry
 
-Creates a new cJSON object containing one SNON value fragment for a single sensor reading. The fragment carries the sensor entity ID under "eID", the power reading under "v", and the ISO 8601 timestamp under "t".
+Creates a new cJSON object containing one SNON value fragment for a single sensor reading. The fragment carries the sensor entity ID under "eID", the power reading under "v", and the ISO 8601 timestamp under "vT".
 
 Returns NULL if object allocation fails.
 
@@ -1545,7 +1555,7 @@ Returns NULL if object allocation fails.
 | ------------ | --------- | --------------- | --------------------------------------------------------------------- |
 | sensor       | in        | sensor_state_t* | Sensor state; series_uuid is read to populate "eID" (Section 8.9).    |
 | sen_value    | in        | double          | Sensor reading stored under the "v" field.                            |
-| timestamp    | in        | const char*     | ISO 8601 string stored under the "t" field.                           |
+| timestamp    | in        | const char*     | ISO 8601 string stored under the "vT" field.                           |
 | return value | out       | cJSON*          | Newly allocated cJSON object; NULL on allocation failure.             |
 
 Other changes to system state include:
@@ -1559,6 +1569,7 @@ Other changes to system state include:
         cJSON*  inner_array = NULL;
         cJSON*  v_array = NULL;
         cJSON*  t_array = NULL;
+        char    num_str[32] = {0};
         char    eid_string[64] = {0};
 
         REQUIRES(NULL != sensor, "NULL pointer passed for sensor");
@@ -1581,16 +1592,17 @@ Other changes to system state include:
             cJSON_AddItemToObject(entry, "v", inner_array);
 
             inner_array = cJSON_CreateArray();
-            cJSON_AddItemToObject(entry, "t", inner_array);
+            cJSON_AddItemToObject(entry, "vT", inner_array);
 
             sensor->first_record = false;
         }
 
         entry = cJSON_GetArrayItem(sensor->snon_array, 0);
         v_array = cJSON_GetObjectItemCaseSensitive(entry, "v");
-        t_array = cJSON_GetObjectItemCaseSensitive(entry, "t");
+        t_array = cJSON_GetObjectItemCaseSensitive(entry, "vT");
 
-        cJSON_AddItemToArray(v_array, cJSON_CreateNumber(sen_value));
+        snprintf(num_str, sizeof(num_str), "%g", sen_value);
+        cJSON_AddItemToArray(v_array, cJSON_CreateString(num_str));
         cJSON_AddItemToArray(t_array, cJSON_CreateString(timestamp));
 
         return(C_SUCCESS);

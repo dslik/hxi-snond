@@ -30,7 +30,7 @@ What the tool does:
 Input value fragment format (produced by hxi-snond):
     [{ "eID": "urn:uuid:<series_uuid>",
        "v":   [<number>, ...],
-       "t":   ["<ISO-8601-UTC>", ...] }]
+       "vT":  ["<ISO-8601-UTC>", ...] }]
 
 Output value fragment format:
     [{ "eID":  "urn:uuid:<sensor_uuid>",
@@ -150,7 +150,7 @@ def read_snon_series(
 
         [{ "eID": "urn:uuid:<series_uuid>",
            "v":   [<number>, ...],
-           "t":   ["<ISO-8601-UTC>", ...] }]
+           "vT":  ["<ISO-8601-UTC>", ...] }]
 
     Files are visited in lexicographic order, which equals chronological
     order given the timestamp-based filename convention of Section 8.6.
@@ -190,7 +190,7 @@ def read_snon_series(
 
         fragment = pack[0]
         v_list = fragment.get("v", [])
-        t_list = fragment.get("t", [])
+        t_list = fragment.get("vT", [])
 
         if len(v_list) != len(t_list):
             raise ValueError(
