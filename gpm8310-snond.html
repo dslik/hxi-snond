@@ -2,9 +2,9 @@
 /*
 ## Overview
 
-Polls and writes sensor data from an Instek GPM-8130 power meter.
+Polls and writes sensor data from a GW Instek GPM-8310 power meter.
 
-Sensor data is written in <a href="https://www.snon.org/">SNON 4</a> <a href="https://datatracker.ietf.org/doc/html/rfc8428">SenML</a> format. The daemon opens a TCP/IP connection to the power meter, configures power integration, creates initial SNON device and sensor records on first run, then enters a continuous polling loop until SIGINT.
+Sensor data is written in <a href="https://www.snon.org/">SNON 4</a> format. The daemon opens a TCP/IP connection to the power meter, configures power integration, creates initial SNON device, sensor, series, and measurand records on first run, then enters a continuous polling loop until SIGINT. All readings are accumulated in memory and written as a single SNON value fragment at the end of the session.
 
 Known issues:
 
@@ -25,21 +25,23 @@ Known issues:
     // SPDX-License-Identifier: BSD-3-Clause
     // ---------------------------------------------------------------------------------
 
-    #include <errno.h>          // errno, ECONNRESET, ERANGE
+    #include <errno.h>          // errno, ECONNRESET, ERANGE, EEXIST, ENOENT
     #include <netdb.h>          // getaddrinfo, freeaddrinfo, struct addrinfo, gai_strerror
     #include <stdint.h>         // Fixed-width integer types: int32_t, uint32_t
     #include <stdbool.h>        // bool, true, false
     #include <stdio.h>          // fprintf, snprintf, stderr
-    #include <stdlib.h>         // NULL, strtod
-    #include <string.h>         // strlen, strstr, strerror
-    #include <unistd.h>         // close
+    #include <stdlib.h>         // NULL, strtod, malloc, free
+    #include <string.h>         // strlen, strstr, strerror, strncpy, strcmp, strncmp
+    #include <unistd.h>         // close, access, symlink, R_OK, W_OK
     #include <limits.h>         // PATH_MAX
     #include <time.h>           // clock_gettime, gmtime_r, nanosleep, struct timespec, struct tm
     #include <getopt.h>         // getopt, optarg
-    #include <fcntl.h>          // open, O_RDONLY, O_RDWR, O_CREAT, O_TRUNC
+    #include <fcntl.h>          // open, O_RDONLY, O_RDWR, O_CREAT, O_TRUNC, O_EXCL
     #include <signal.h>         // sigaction, sigemptyset, raise, SIGINT, SA_RESTART, struct sigaction
     #include <sys/socket.h>     // socket, connect, recv, send, setsockopt, MSG_NOSIGNAL, SOL_SOCKET, SO_RCVTIMEO, SO_SNDTIMEO
+    #include <sys/stat.h>       // mkdir, fstat, struct stat, S_IRUSR, S_IWUSR, S_IRWXU
     #include <sys/time.h>       // struct timeval
+    #include <dirent.h>         // opendir, readdir, closedir, DIR, struct dirent
 
     // Local includes
     #include "asdfg-c-types.h"  // Type conversion helper functions
@@ -72,6 +74,23 @@ Constants for connecting to the device and for device control using the SCPI pro
     // ISO 8601 timestamp
     #define C_ISO8601_LEN               28U             // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
 
+    // SNON JSON field keys
+    #define C_SNON_EID_KEY              "eID"           // SNON entity identifier field key
+    #define C_SNON_EC_KEY               "eC"            // SNON entity class field key
+    #define C_SNON_EN_KEY               "eN"            // SNON entity name field key
+    #define C_SNON_ER_KEY               "eR"            // SNON entity relation field key
+    #define C_SNON_LANG_DEFAULT         "*"             // SNON wildcard language tag for default name
+    #define C_SNON_SERIES_CLASS         "series"        // SNON entity class value for series records
+
+    // SNON URN constants
+    #define C_URN_UUID_PREFIX           "urn:uuid:"     // URN prefix prepended to each entity UUID
+    #define C_URN_UUID_PREFIX_LEN       9U              // Byte length of C_URN_UUID_PREFIX (no null)
+    #define C_SNON_EID_LEN              46U             // Buffer size for "urn:uuid:<UUID>\0" (9 + 36 + 1)
+
+    // Miscellaneous
+    #define C_JSON_EXT                  ".json"         // JSON file extension string
+    #define C_JSON_EXT_LEN              5U              // Byte length of C_JSON_EXT (no null)
+
 /*
 ### Project prototypes
 
@@ -79,8 +98,18 @@ Local functions
 */
 
     int main(int argc, char* argv[]);
-    int32_t gpm8310_collect_values(const char* snon_path, int32_t dev_fd, char* sensor_uuid);
-    
+    int32_t gpm8310_collect_values(const char* snon_path, int32_t dev_fd, const char* series_uuid);
+
+    // SNON filesystem layout helpers (Section 8)
+    int32_t snon_validate_dir(const char* snon_path, int32_t mode);
+    int32_t gpm8310_create_snon_definitions(const char* snon_path, const char* device_uuid, char* series_uuid_out);
+    int32_t gpm8310_find_sensor_uuid(const char* snon_path, const char* device_uuid, char* sensor_uuid_out);
+    int32_t gpm8310_ensure_measurand(const char* snon_path, const char* measurand_name, char* measurand_uuid_out);
+    int32_t gpm8310_make_dir_if_missing(const char* path);
+    int32_t gpm8310_create_symlink_pair(const char* link_dir, const char* uuid, const char* rel_file_target, const char* rel_dir_target);
+    void    snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name);
+    void    string_replace_char(char* string, char find_byte, char replace_byte);
+
     // SCPI utility routines
     int32_t scpi_send_cmd(int32_t socket_fd, const char* cmd);
     int32_t scpi_recv_line(int32_t socket_fd, char* buffer, uint32_t buffer_length);
@@ -114,7 +143,7 @@ Global variables
                           "Options:\n"
                           "  -a HOST     Hostname or IP address of the GPM 8310 power meter\n"
                           "  -p PORT     TCP/IP port where the GPM 8310 power meter listens for incoming SCPI connections.\n"
-                          "  -s SNONDIR  Location to read and write SNON files (default: ./snon)\n"
+                          "  -s SNONDIR  Location to read and write SNON files (default: ./snon/)\n"
                           "  -u UUID     Device UUID (default: randomly generated)\n"
                           "  -h          Show this help message\n";
 
@@ -123,7 +152,7 @@ Global variables
 /*
 ## GPM 8310 sensor daemon entry point
 
-Parses command-line arguments, opens and validates the TCP/IP connection to the GPM 8310 power meter, creates initial SNON device and sensor records on first run, then delegates continuous sensor value collection to `gpm8310_collect_values`.
+Parses command-line arguments, opens and validates the TCP/IP connection to the GPM 8310 power meter, creates initial SNON device, sensor, measurand, and series records on first run, then delegates continuous sensor value collection to `gpm8310_collect_values`.
 
 The daemon runs until it receives a SIGINT signal, at which point the signal handler sets `g_abort_collect` and the collection loop exits cleanly on its next polling iteration.
 
@@ -137,9 +166,11 @@ The daemon runs until it receives a SIGINT signal, at which point the signal han
 
 Other changes to system state include:
 
-- May create up to two new JSON files in the output directory (device record and sensor record).
-- May create one new subdirectory in the output directory (sensor value directory).
-- Opens and closes a TCP/IP connection to the host specified by -d and the port specified by -p.
+- Creates `devices/<uuid>.json` and `sensors/<uuid>.json` on first run; skipped without error on subsequent runs.
+- Creates `measurands/<uuid>.json` for "Cumulative Watt-Hours" on first run; skipped if it already exists.
+- Creates a new `series/<uuid>.json` and `series/<uuid>/values/` on every run (one series per session).
+- Creates relative symlink pairs linking the device to the sensor and the sensor to the series (Section 8.7).
+- Opens and closes a TCP/IP connection to the host specified by -a and the port specified by -p.
 
 */
 
@@ -151,13 +182,14 @@ Other changes to system state include:
         const char*             snon_path = "./snon/";
         const char*             uuid_arg = NULL;
         char                    device_uuid[C_UUID_LEN] = {0};
+        char                    series_uuid[C_UUID_LEN] = {0};
         int32_t                 dev_fd = 0;
-        
+
         // Obtain command line arguments
         while(C_FAILURE != opt)
         {
             opt = getopt(argc, argv, "a:p:s:u:h");
-            
+
             switch(opt)
             {
                 case 'a':
@@ -201,24 +233,17 @@ Other changes to system state include:
                 }
             }
         }
-        
+
         // ===========================================================
         // Validate Inputs
-        
-        if(C_FAILURE == access(snon_path, R_OK | W_OK))
+
+        if(C_FAILURE == snon_validate_dir(snon_path, R_OK | W_OK))
         {
-            fprintf(stderr, "Error accessing specified SNON directory: %s\n", snon_path);
+            fprintf(stderr, "Invalid SNON directory: %s\n", snon_path);
             perror(snon_path);
             return(EXIT_FAILURE);
         }
-                
-        // Ensure that the output directory ends with a "/"
-        if('/' != snon_path[strlen(snon_path) - 1])
-        {
-            fprintf(stderr, "Specified SNON directory does not end with a '/': %s\n", snon_path);
-            return(EXIT_FAILURE);
-        }
-        
+
         // Validate or generate UUID
         if(NULL != uuid_arg)
         {
@@ -227,7 +252,7 @@ Other changes to system state include:
                 fprintf(stderr, "Invalid UUID format: %s\n", uuid_arg);
                 return(EXIT_FAILURE);
             }
-            
+
             memcpy(device_uuid, uuid_arg, sizeof(device_uuid));
         }
         else
@@ -238,10 +263,10 @@ Other changes to system state include:
                 return(EXIT_FAILURE);
             }
         }
-        
+
         // ===========================================================
-        // Initialize a connecion to the GPM 8310 Power Analyzer
-        dev_fd =  gpm8310_connect(device_addr, device_port);
+        // Initialize a connection to the GPM 8310 Power Analyzer
+        dev_fd = gpm8310_connect(device_addr, device_port);
 
         if(dev_fd <= 0)
         {
@@ -249,37 +274,57 @@ Other changes to system state include:
             perror(device_addr);
             return(EXIT_FAILURE);
         }
-        
-        if(C_SUCCESS != gpm8310_instrument_identify(dev_fd))
-        {
-            fprintf(stderr, "Unexpected Device\n");
-            close(dev_fd);
-            return(EXIT_FAILURE);
-        }
-        
-        if(C_SUCCESS != gpm8310_instrument_configure(dev_fd))
-        {
-            fprintf(stderr, "Unable to configure GPM 8310\n");
-            close(dev_fd);
-            return(EXIT_FAILURE);
-        }
-         
+
         // ===========================================================
-        // Obtain GPM 8310 Power Supply Information
-        if(C_FAILURE == gpm8310_collect_values(snon_path, dev_fd, device_uuid))
+        // Create SNON entity records for this device and obtain the series UUID
+        // for this session. Device and sensor records are created only on the
+        // first run; a new series is created on every run (one per session).
+        if(C_FAILURE == gpm8310_create_snon_definitions(snon_path, device_uuid, series_uuid))
+        {
+            fprintf(stderr, "Error creating SNON definition records\n");
+            gpm8310_disconnect(dev_fd);
+            return(EXIT_FAILURE);
+        }
+
+        // ===========================================================
+        // Collect GPM 8310 watt-hour readings and write them to the SNON tree
+        if(C_FAILURE == gpm8310_collect_values(snon_path, dev_fd, series_uuid))
         {
             fprintf(stderr, "Error writing SNON value record\n");
             gpm8310_disconnect(dev_fd);
             return(EXIT_FAILURE);
         }
-        
+
         gpm8310_disconnect(dev_fd);
         return(EXIT_SUCCESS);
     }
 
+/*
+## Collect GPM-8310 watt-hour values
 
+Accumulates watt-hour readings from the GPM-8310 into a single in-memory SNON value fragment, then writes the fragment to disk as one timestamped value file when the session ends.
 
-    int32_t gpm8310_collect_values(const char* snon_path, int32_t dev_fd, char* sensor_uuid)
+Installs a SIGINT handler that sets `g_abort_collect`, causing the polling loop to exit cleanly. On exit the handler is unregistered. The accumulated fragment is written to `series/<series_uuid>/values/<start_timestamp>.json`, where `<start_timestamp>` is the ISO 8601 UTC timestamp of the first poll with colons replaced by hyphens (Section 8.6). The file is written even if a read error interrupted the session, provided at least one reading was captured before the error.
+
+### Interactions
+
+| Parameter       | Direction | Type         | Description                                                              |
+| --------------- | --------- | ------------ | ------------------------------------------------------------------------ |
+| snon_path       | in        | const char*  | SNON root path. Must not be NULL. Must end with '/'.                     |
+| dev_fd          | in        | int32_t      | Connected socket file descriptor returned by `gpm8310_connect`.          |
+| series_uuid     | in        | const char*  | UUID of the series entity whose `eID` appears in the value fragment.     |
+| return value    | out       | int32_t      | C_SUCCESS on clean exit; C_FAILURE on any I/O or device error.           |
+| g_abort_collect | shared    | sig_atomic_t | Global flag; polled each iteration; written true by signal_handler.      |
+
+Other changes to system state include:
+
+- Installs and restores the SIGINT handler via sigaction with SA_RESTART.
+- Creates one JSON file at `series/<series_uuid>/values/<timestamp>.json`.
+- Calls nanosleep between successful poll iterations to maintain the C_POLL_INTERVAL_NS cadence.
+
+*/
+
+    int32_t gpm8310_collect_values(const char* snon_path, int32_t dev_fd, const char* series_uuid)
     {
         struct sigaction    signal_action = {0};
         struct sigaction    old_signal_action = {0};
@@ -288,26 +333,51 @@ Other changes to system state include:
         struct timespec     poll_end = {0};
         struct timespec     sleep_duration = {0};
         double              wh_value = 0.0;
-        char                working_string[128] = {0};
+        char                timestamp[C_ISO8601_LEN] = {0};
+        char                first_timestamp[C_ISO8601_LEN] = {0};
         int64_t             poll_start_nsec = 0;
         int64_t             poll_end_nsec = 0;
         int64_t             remaining_ns = 0;
         int32_t             return_status = C_SUCCESS;
-        cJSON*              senml_data = NULL;
-        cJSON*              senml_entry = NULL;
-        char                urn_base_name[64] = {0};
+        cJSON*              snon_array = NULL;
+        cJSON*              snon_entry = NULL;
+        cJSON*              v_array = NULL;
+        cJSON*              vt_array = NULL;
         char                snon_dpath[PATH_MAX] = {0};
+        char                eid_string[C_SNON_EID_LEN] = {0};
+        char                num_str[32] = {0};
         char*               snon_output = NULL;
         int32_t             snon_fd = C_FAILURE;
         size_t              data_len = 0U;
         ssize_t             data_written_len = 0;
+        bool                first_poll = true;
 
         REQUIRES(NULL != snon_path, "NULL pointer passed for snon_path");
-        REQUIRES(NULL != sensor_uuid, "NULL pointer passed for sensor_uuid");
+        REQUIRES(NULL != series_uuid, "NULL pointer passed for series_uuid");
         REQUIRES(dev_fd >= 0, "Invalid file descriptor %d", dev_fd);
 
-        // Create array for SenML data
-        senml_data = cJSON_CreateArray();
+        // Build the single SNON value fragment that accumulates all readings for
+        // this session. The outer array holds exactly one fragment object; the
+        // eID references the series entity (Section 8.9). The v and vT arrays
+        // are left empty here and populated during the polling loop below.
+        snon_array = cJSON_CreateArray();
+        ASSERT(NULL != snon_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+
+        snon_entry = cJSON_CreateObject();
+        ASSERT(NULL != snon_entry, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+        snprintf(eid_string, sizeof(eid_string), "urn:uuid:%s", series_uuid);
+        cJSON_AddItemToObjectCS(snon_entry, "eID", cJSON_CreateString(eid_string));
+
+        v_array = cJSON_CreateArray();
+        ASSERT(NULL != v_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+        cJSON_AddItemToObject(snon_entry, "v", v_array);
+
+        vt_array = cJSON_CreateArray();
+        ASSERT(NULL != vt_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+        cJSON_AddItemToObject(snon_entry, "vT", vt_array);
+
+        cJSON_AddItemToArray(snon_array, snon_entry);
 
         signal_action.sa_handler = signal_handler;
         signal_action.sa_flags = SA_RESTART;
@@ -329,39 +399,44 @@ Other changes to system state include:
             else
             {
                 clock_gettime(CLOCK_MONOTONIC, &poll_start);
-                iso8601_time(working_string, sizeof(working_string));
+                iso8601_time(timestamp, sizeof(timestamp));
 
-                gpm8310_read_wh(dev_fd, &wh_value);
-
-                if(NULL == senml_entry)
+                // On the first poll, record the timestamp; it becomes the value
+                // filename (Section 8.6) and remains stable for the whole session.
+                if(true == first_poll)
                 {
-                    senml_entry = cJSON_CreateObject();
+                    strncpy(first_timestamp, timestamp, sizeof(first_timestamp) - 1U);
+                    first_timestamp[sizeof(first_timestamp) - 1U] = '\0';
+                    first_poll = false;
+                }
 
-                    snprintf(urn_base_name, sizeof(urn_base_name), "urn:uuid:%s", sensor_uuid);
-                    cJSON_AddItemToObjectCS(senml_entry, "bn", cJSON_CreateString(urn_base_name));
-                    cJSON_AddItemToArray(senml_data, senml_entry);
+                if(C_FAILURE == gpm8310_read_wh(dev_fd, &wh_value))
+                {
+                    fprintf(stderr, "gpm8310_collect_values: read failed; stopping collection\n");
+                    return_status = C_FAILURE;
+                    should_poll = false;
                 }
                 else
                 {
-                    senml_entry = cJSON_CreateObject();
+                    // ASDFG-C 6.23 VIOLATION: wh_value is double; formatted as a string
+                    // to match the SNON v array convention used throughout this codebase
+                    snprintf(num_str, sizeof(num_str), "%g", wh_value);
+                    cJSON_AddItemToArray(v_array, cJSON_CreateString(num_str));
+                    cJSON_AddItemToArray(vt_array, cJSON_CreateString(timestamp));
 
-                    cJSON_AddItemToObjectCS(senml_entry, "v", cJSON_CreateNumber(wh_value));
-                    cJSON_AddItemToObjectCS(senml_entry, "t", cJSON_CreateString(working_string));
-                    cJSON_AddItemToArray(senml_data, senml_entry);
-                }
+                    clock_gettime(CLOCK_MONOTONIC, &poll_end);
 
-                clock_gettime(CLOCK_MONOTONIC, &poll_end);
+                    poll_start_nsec = (int64_from_time(poll_start.tv_sec) * C_NS_PER_SECOND) + int64_from_time(poll_start.tv_nsec);
+                    poll_end_nsec   = (int64_from_time(poll_end.tv_sec)   * C_NS_PER_SECOND) + int64_from_time(poll_end.tv_nsec);
 
-                poll_start_nsec = (int64_from_time(poll_start.tv_sec) * C_NS_PER_SECOND) + int64_from_time(poll_start.tv_nsec);
-                poll_end_nsec =   (int64_from_time(poll_end.tv_sec)   * C_NS_PER_SECOND) + int64_from_time(poll_end.tv_nsec);
+                    remaining_ns = C_POLL_INTERVAL_NS - (poll_end_nsec - poll_start_nsec);
 
-                remaining_ns = C_POLL_INTERVAL_NS - (poll_end_nsec - poll_start_nsec);
-
-                if(0 < remaining_ns)
-                {
-                    sleep_duration.tv_sec = time_from_int64(remaining_ns / C_NS_PER_SECOND);
-                    sleep_duration.tv_nsec = (long) (remaining_ns % C_NS_PER_SECOND);
-                    nanosleep(&sleep_duration, NULL);
+                    if(0 < remaining_ns)
+                    {
+                        sleep_duration.tv_sec = time_from_int64(remaining_ns / C_NS_PER_SECOND);
+                        sleep_duration.tv_nsec = (long) (remaining_ns % C_NS_PER_SECOND);
+                        nanosleep(&sleep_duration, NULL);
+                    }
                 }
             }
         }
@@ -376,36 +451,1038 @@ Other changes to system state include:
             }
         }
 
+        // Write out all accumulated readings as a single value file, provided at
+        // least one reading was captured. The file is written even when a later
+        // poll error set return_status, so partial session data is preserved.
+        if(false == first_poll)
+        {
+            // Value filename: ISO 8601 start timestamp with ':' replaced by '-',
+            // written under the series values directory (Section 8.6).
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sseries/%s/values/%s.json",
+                     snon_path, series_uuid, first_timestamp);
+            string_replace_char(snon_dpath, ':', '-');
+
+            snon_output = cJSON_PrintUnformatted(snon_array);
+            ASSERT(NULL != snon_output, "Memory allocation failed serialising SNON array for series %s", series_uuid);
+
+            snon_fd = int32_from_int(open(snon_dpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+
+            if(C_FAILURE == snon_fd)
+            {
+                fprintf(stderr, "Error creating SNON value record file: %s\n", snon_dpath);
+                perror("open");
+                return_status = C_FAILURE;
+            }
+            else
+            {
+                data_len = strlen(snon_output);
+                data_written_len = write(snon_fd, snon_output, data_len);
+
+                // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with data_len; safe because data_written_len is checked for < 0 first
+                if((data_written_len < 0) || ((size_t) data_written_len != data_len))
+                {
+                    fprintf(stderr, "Error writing SNON value record for series %s\n", series_uuid);
+                    perror("write");
+                    return_status = C_FAILURE;
+                }
+
+                close(snon_fd);
+            }
+
+            cJSON_free(snon_output);
+        }
+
+        cJSON_Delete(snon_array);
+
+        return(return_status);
+    }
+
+/*
+## Validate and initialise the SNON root directory
+
+Checks that snon_path ends with '/', creates the root directory if it does not yet exist, verifies it is accessible with `mode`, and creates each of the five required entity class subdirectories (`devices/`, `locations/`, `measurands/`, `sensors/`, `series/`) if they are missing. EEXIST on any mkdir call is treated as success so the function is idempotent.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                                            |
+| ------------ | --------- | ----------- | ---------------------------------------------------------------------- |
+| snon_path    | in        | const char* | SNON root path. Must end with '/'.                                     |
+| mode         | in        | int32_t     | access(2) mode flags to verify on the root directory (e.g. R_OK|W_OK).|
+| return value | out       | int32_t     | C_SUCCESS on success; C_FAILURE if the path is invalid or inaccessible.|
+
+Other changes to system state include:
+
+- Creates snon_path and up to five subdirectories via mkdir.
+
+*/
+
+    int32_t snon_validate_dir(const char* snon_path, int32_t mode)
+    {
+        int32_t             return_status = C_SUCCESS;
+        char                sub_path[PATH_MAX] = {0};
+        int32_t             path_len = 0;
+        int32_t             index = 0;
+        const char*         subdirs[] = { "devices", "locations", "measurands", "sensors", "series", NULL };
+
+        REQUIRES(NULL != snon_path, "NULL pointer passed for snon_path");
+
+        // Ensure the path ends with '/'.
+        if('/' != snon_path[strlen(snon_path) - 1])
+        {
+            fprintf(stderr, "Specified SNON directory does not end with a '/': %s\n", snon_path);
+            return_status = C_FAILURE;
+        }
+
+        // Create the root SNON directory if it does not already exist.
         if(C_SUCCESS == return_status)
         {
-            // Write out collected data
-            snon_output = cJSON_PrintUnformatted(senml_data);
-            ASSERT(NULL != snon_output, "Memory allocation failed serialising SenML array for sensor %u", sensor_uuid);
-
-            snprintf(snon_dpath, sizeof(snon_dpath), "%s%s.json", snon_path, sensor_uuid);
-            snon_fd = int32_from_int(open(snon_dpath, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR));
-
-            data_len = strlen(snon_output);
-            data_written_len = write(snon_fd, snon_output, data_len);
-
-            // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with data_len; safe because data_written_len is checked for < 0 first
-            if((data_written_len < 0) || ((size_t) data_written_len != data_len))
+            if(C_FAILURE == mkdir(snon_path, 0755))
             {
-                fprintf(stderr, "Error writing SNON value record for sensor %s\n", sensor_uuid);
+                if(EEXIST != errno)
+                {
+                    fprintf(stderr, "Error creating SNON root directory: %s\n", snon_path);
+                    perror(snon_path);
+                    return_status = C_FAILURE;
+                }
+            }
+        }
+
+        // Verify the root directory is accessible with the requested mode.
+        if(C_SUCCESS == return_status)
+        {
+            return_status = access(snon_path, mode);
+            if(C_FAILURE == return_status)
+            {
+                fprintf(stderr, "Error accessing specified SNON directory: %s\n", snon_path);
+                perror(snon_path);
+            }
+        }
+
+        // Create each required entity class subdirectory if it does not already exist.
+        while((NULL != subdirs[index]) && (C_SUCCESS == return_status))
+        {
+            path_len = snprintf(sub_path, sizeof(sub_path), "%s%s", snon_path, subdirs[index]);
+            if(path_len >= (int32_t)sizeof(sub_path))
+            {
+                fprintf(stderr, "SNON subdirectory path too long: %s%s\n", snon_path, subdirs[index]);
+                return_status = C_FAILURE;
+            }
+
+            if(C_SUCCESS == return_status)
+            {
+                if(C_FAILURE == mkdir(sub_path, 0755))
+                {
+                    if(EEXIST != errno)
+                    {
+                        fprintf(stderr, "Error creating SNON entity class directory: %s\n", sub_path);
+                        perror(sub_path);
+                        return_status = C_FAILURE;
+                    }
+                }
+            }
+
+            index = index + 1;
+        }
+
+        return(return_status);
+    }
+
+/*
+## Add a localised name entry to a SNON object
+
+Creates a child JSON object containing a single language-keyed string entry and attaches it to the parent SNON object under the given field key. Used to populate the `eN` (entity name) field in SNON records, following the SNON 4 name format where the field value is itself a JSON object mapping language tags to name strings.
+
+### Interactions
+
+| Parameter   | Direction | Type   | Description                                                        |
+| ----------- | --------- | ------ | ------------------------------------------------------------------ |
+| snon_object | in/out    | cJSON* | Parent SNON JSON object; the named field is added in place.        |
+| field       | in        | char*  | JSON key under which the name sub-object is inserted (e.g. "eN"). |
+| lang        | in        | char*  | BCP-47 language tag for the name entry; use "*" as the default.    |
+| name        | in        | char*  | Human-readable name string; stored as a JSON string value.         |
+
+Other changes to system state include:
+
+- Allocates heap memory via cJSON for the child name object. This memory is owned
+  by snon_object and freed when cJSON_Delete(snon_object) is called by the caller.
+
+*/
+
+    void snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name)
+    {
+        cJSON*  name_object = NULL;
+
+        REQUIRES(NULL != snon_object, "NULL pointer passed for snon_object");
+        REQUIRES(NULL != field, "NULL pointer passed for field");
+        REQUIRES(NULL != lang, "NULL pointer passed for lang");
+        REQUIRES(NULL != name, "NULL pointer passed for name");
+
+        name_object = cJSON_CreateObject();
+        ASSERT(NULL != name_object, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+        cJSON_AddItemToObjectCS(name_object, lang, cJSON_CreateString(name));
+        cJSON_AddItemToObjectCS(snon_object, field, name_object);
+    }
+
+/*
+## string_replace_char
+
+Replaces every occurrence of a target byte value within a null-terminated string with a substitute byte value. The string is modified in place and its length is unchanged after the call.
+
+Used to convert ISO 8601 timestamps into filesystem-safe value filenames by replacing ':' with '-' (Section 8.6).
+
+### Interactions
+
+| Parameter    | Direction | Type   | Description                                                                     |
+| ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
+| string       | in/out    | char*  | Pointer to the null-terminated string to modify in place. Must not be NULL.     |
+| find_byte    | in        | char   | The byte value to search for within `string`.                                   |
+| replace_byte | in        | char   | The byte value to substitute for each occurrence of `find_byte`.                |
+
+Other changes to system state include:
+
+- The string pointed to by `string` is modified in place.
+
+*/
+
+    void string_replace_char(char* string, char find_byte, char replace_byte)
+    {
+        uint32_t    string_length = 0U;
+        uint32_t    index = 0U;
+
+        REQUIRES(NULL != string, "NULL value passed for string");
+        REQUIRES('\0' != replace_byte, "replace_byte must not be the null terminator");
+
+        string_length = strlen(string);
+
+        while(index < string_length)
+        {
+            if(string[index] == find_byte)
+            {
+                string[index] = replace_byte;
+            }
+
+            index = index + 1U;
+        }
+
+        ENSURES(strlen(string) == string_length, "String length changed unexpectedly: expected %zu, got %zu", string_length, strlen(string));
+    }
+
+/*
+## gpm8310_make_dir_if_missing
+
+Creates `path` as a directory if it does not already exist. EEXIST is treated as success so that calls on an already-initialised SNON tree are idempotent.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                           |
+| ------------ | --------- | ----------- | ----------------------------------------------------- |
+| path         | in        | const char* | Directory path to create.                             |
+| return value | out       | int32_t     | C_SUCCESS on success or EEXIST; C_FAILURE otherwise.  |
+
+Other changes to system state include:
+
+- Creates a directory at `path` via mkdir.
+
+*/
+
+    int32_t gpm8310_make_dir_if_missing(const char* path)
+    {
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != path, "NULL pointer passed for path");
+
+        if(C_FAILURE == mkdir(path, S_IRWXU))
+        {
+            if(EEXIST != errno)
+            {
+                fprintf(stderr, "Error creating directory: %s\n", path);
+                perror("mkdir");
+                return_status = C_FAILURE;
+            }
+        }
+
+        return(return_status);
+    }
+
+/*
+## gpm8310_create_symlink_pair
+
+Creates two relative symlinks in `link_dir` for the entity identified by `uuid`: a fragment-file symlink (`<uuid>.json`) pointing to `rel_file_target`, and a directory symlink (`<uuid>`) pointing to `rel_dir_target`. EEXIST on either symlink is treated as success so repeated calls are idempotent.
+
+Per Section 8.7, all symlinks SHALL be relative so the tree remains portable when moved, archived, or mounted at a different path.
+
+### Interactions
+
+| Parameter       | Direction | Type        | Description                                                        |
+| --------------- | --------- | ----------- | ------------------------------------------------------------------ |
+| link_dir        | in        | const char* | Directory in which to place both symlinks. Must end with '/'.      |
+| uuid            | in        | const char* | UUID string used as the basename for both symlinks (Section 8.7.2).|
+| rel_file_target | in        | const char* | Relative target path for the .json file symlink.                   |
+| rel_dir_target  | in        | const char* | Relative target path for the directory symlink.                    |
+| return value    | out       | int32_t     | C_SUCCESS on success or EEXIST; C_FAILURE if any symlink call fails.|
+
+Other changes to system state include:
+
+- Creates up to two symlinks in `link_dir`.
+
+*/
+
+    int32_t gpm8310_create_symlink_pair(const char* link_dir, const char* uuid, const char* rel_file_target, const char* rel_dir_target)
+    {
+        char        link_path[PATH_MAX] = {0};
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != link_dir, "NULL pointer passed for link_dir");
+        REQUIRES(NULL != uuid, "NULL pointer passed for uuid");
+        REQUIRES(NULL != rel_file_target, "NULL pointer passed for rel_file_target");
+        REQUIRES(NULL != rel_dir_target, "NULL pointer passed for rel_dir_target");
+
+        // Create the .json fragment-file symlink.
+        snprintf(link_path, sizeof(link_path), "%s%s.json", link_dir, uuid);
+        if(C_FAILURE == symlink(rel_file_target, link_path))
+        {
+            if(EEXIST != errno)
+            {
+                fprintf(stderr, "Error creating symlink %s -> %s\n", link_path, rel_file_target);
+                perror("symlink");
+                return_status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            // Create the directory symlink.
+            snprintf(link_path, sizeof(link_path), "%s%s", link_dir, uuid);
+            if(C_FAILURE == symlink(rel_dir_target, link_path))
+            {
+                if(EEXIST != errno)
+                {
+                    fprintf(stderr, "Error creating symlink %s -> %s\n", link_path, rel_dir_target);
+                    perror("symlink");
+                    return_status = C_FAILURE;
+                }
+            }
+        }
+
+        return(return_status);
+    }
+
+/*
+## gpm8310_ensure_measurand
+
+Searches `snon_path/measurands/` for an existing fragment whose `eN["*"]` matches `measurand_name`, and writes the found UUID to `measurand_uuid_out`. If no match is found, creates a new immutable measurand fragment file and writes the new UUID instead.
+
+Per Section 8.10, measurand files SHALL NOT be modified once written. O_EXCL is used when creating a new file, and existing files are never updated. If the `measurands/` directory does not yet exist it is treated as an empty set and a new measurand is created.
+
+### Interactions
+
+| Parameter          | Direction | Type        | Description                                                       |
+| ------------------ | --------- | ----------- | ----------------------------------------------------------------- |
+| snon_path          | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.              |
+| measurand_name     | in        | const char* | Name to find or create a measurand for. Must not be NULL.         |
+| measurand_uuid_out | out       | char*       | Receives the UUID of the found or created measurand. Buffer must  |
+|                    |           |             | be at least C_UUID_LEN bytes.                                     |
+| return value       | out       | int32_t     | C_SUCCESS on success; C_FAILURE on any I/O or allocation error.   |
+
+Other changes to system state include:
+
+- Creates `snon_path/measurands/<new_uuid>.json` when no matching measurand is found.
+
+*/
+
+    int32_t gpm8310_ensure_measurand(const char* snon_path, const char* measurand_name, char* measurand_uuid_out)
+    {
+        char            measurands_dir[PATH_MAX] = {0};
+        char            candidate_path[PATH_MAX + 1024] = {0};
+        char            new_file_path[PATH_MAX + 1024] = {0};
+        char            new_uuid[C_UUID_LEN] = {0};
+        char            working_string[1024] = {0};
+        DIR*            dir_handle = NULL;
+        struct dirent*  dir_entry = NULL;
+        struct stat     stat_buf;
+        int32_t         file_fd = C_FAILURE;
+        ssize_t         bytes_read = 0;
+        char*           file_contents = NULL;
+        cJSON*          fragment_array = NULL;
+        cJSON*          fragment = NULL;
+        cJSON*          eid_item = NULL;
+        cJSON*          en_item = NULL;
+        cJSON*          en_wildcard = NULL;
+        cJSON*          snon_root = NULL;
+        cJSON*          measurand_obj = NULL;
+        char*           snon_output = NULL;
+        size_t          output_len = 0U;
+        ssize_t         bytes_written = 0;
+        size_t          entry_len = 0U;
+        bool            found = false;
+        bool            scan_done = false;
+        int32_t         return_status = C_SUCCESS;
+
+        REQUIRES(NULL != snon_path, "snon_path is NULL");
+        REQUIRES(NULL != measurand_name, "measurand_name is NULL");
+        REQUIRES(NULL != measurand_uuid_out, "measurand_uuid_out is NULL");
+
+        snprintf(measurands_dir, sizeof(measurands_dir), "%smeasurands/", snon_path);
+
+        // Scan the measurands directory for an existing fragment with a matching eN.
+        dir_handle = opendir(measurands_dir);
+        if(NULL == dir_handle)
+        {
+            if(ENOENT != errno)
+            {
+                fprintf(stderr, "Error opening measurands directory: %s\n", measurands_dir);
+                perror("opendir");
+                return_status = C_FAILURE;
+            }
+            // ENOENT means no measurands have been written yet; proceed to create one.
+        }
+
+        if((C_SUCCESS == return_status) && (NULL != dir_handle))
+        {
+            while(false == scan_done)
+            {
+                dir_entry = readdir(dir_handle);
+                if(NULL == dir_entry)
+                {
+                    scan_done = true;
+                }
+                else
+                {
+                    entry_len = strlen(dir_entry->d_name);
+
+                    // Only inspect files with the .json extension; skip dotfiles.
+                    if((entry_len > C_JSON_EXT_LEN) && (0 == strcmp(dir_entry->d_name + entry_len - C_JSON_EXT_LEN, C_JSON_EXT)))
+                    {
+                        snprintf(candidate_path, sizeof(candidate_path), "%s%s", measurands_dir, dir_entry->d_name);
+
+                        file_fd = int32_from_int(open(candidate_path, O_RDONLY));
+                        if(C_FAILURE != file_fd)
+                        {
+                            if(C_SUCCESS == fstat(file_fd, &stat_buf))
+                            {
+                                file_contents = (char*)malloc((size_t)stat_buf.st_size + 1U);
+                                if(NULL != file_contents)
+                                {
+                                    bytes_read = read(file_fd, file_contents, (size_t)stat_buf.st_size);
+                                    if(bytes_read == (ssize_t)stat_buf.st_size)
+                                    {
+                                        file_contents[stat_buf.st_size] = '\0';
+                                        fragment_array = cJSON_Parse(file_contents);
+                                        if(NULL != fragment_array)
+                                        {
+                                            // Fragment files are JSON arrays; inspect the first element.
+                                            fragment = cJSON_GetArrayItem(fragment_array, 0);
+                                            if(NULL != fragment)
+                                            {
+                                                en_item = cJSON_GetObjectItem(fragment, "eN");
+                                                if(NULL != en_item)
+                                                {
+                                                    // snon_addname writes eN as {"*": "name"}.
+                                                    en_wildcard = cJSON_GetObjectItem(en_item, "*");
+                                                    if((NULL != en_wildcard) && cJSON_IsString(en_wildcard) && (0 == strcmp(en_wildcard->valuestring, measurand_name)))
+                                                    {
+                                                        eid_item = cJSON_GetObjectItem(fragment, "eID");
+                                                        if((NULL != eid_item) && cJSON_IsString(eid_item) && (0 == strncmp(eid_item->valuestring, "urn:uuid:", C_URN_UUID_PREFIX_LEN)))
+                                                        {
+                                                            strncpy(measurand_uuid_out, eid_item->valuestring + C_URN_UUID_PREFIX_LEN, C_UUID_LEN - 1U);
+                                                            measurand_uuid_out[C_UUID_LEN - 1U] = '\0';
+                                                            found = true;
+                                                            scan_done = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            cJSON_Delete(fragment_array);
+                                            fragment_array = NULL;
+                                        }
+                                    }
+                                    free(file_contents);
+                                    file_contents = NULL;
+                                }
+                            }
+                            close(file_fd);
+                            file_fd = C_FAILURE;
+                        }
+                    }
+                }
+            }
+            closedir(dir_handle);
+        }
+
+        // No existing measurand matched; create one.
+        if((C_SUCCESS == return_status) && (false == found))
+        {
+            if(C_FAILURE == generate_random_uuid(new_uuid))
+            {
+                fprintf(stderr, "Error generating UUID for measurand '%s'\n", measurand_name);
+                return_status = C_FAILURE;
+            }
+
+            if(C_SUCCESS == return_status)
+            {
+                snprintf(new_file_path, sizeof(new_file_path), "%s%s.json", measurands_dir, new_uuid);
+
+                // O_EXCL guarantees immutability: measurand files SHALL NOT be overwritten (Section 8.10).
+                file_fd = int32_from_int(open(new_file_path, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+                if(C_FAILURE == file_fd)
+                {
+                    fprintf(stderr, "Error creating measurand file: %s\n", new_file_path);
+                    perror("open");
+                    return_status = C_FAILURE;
+                }
+            }
+
+            if(C_SUCCESS == return_status)
+            {
+                // Fragment files SHALL contain a JSON array (Section 8.5).
+                snon_root = cJSON_CreateArray();
+                ASSERT(NULL != snon_root, "cJSON_CreateArray() returned NULL; memory exhausted");
+
+                measurand_obj = cJSON_CreateObject();
+                ASSERT(NULL != measurand_obj, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+                snprintf(working_string, sizeof(working_string), "urn:uuid:%s", new_uuid);
+                cJSON_AddItemToObjectCS(measurand_obj, "eID", cJSON_CreateString(working_string));
+                cJSON_AddItemToObjectCS(measurand_obj, "eC", cJSON_CreateString("measurand"));
+                snon_addname(measurand_obj, "eN", "*", measurand_name);
+                cJSON_AddItemToArray(snon_root, measurand_obj);
+
+                snon_output = cJSON_PrintUnformatted(snon_root);
+                ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
+
+                output_len = strlen(snon_output);
+                bytes_written = write(file_fd, snon_output, output_len);
+
+                // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with output_len, safe because bytes_written is checked for < 0 first
+                if((bytes_written < 0) || ((size_t)bytes_written != output_len))
+                {
+                    fprintf(stderr, "Error writing measurand record: %s\n", new_file_path);
+                    perror("write");
+                    return_status = C_FAILURE;
+                }
+
+                cJSON_free(snon_output);
+                cJSON_Delete(snon_root);
+                close(file_fd);
+            }
+
+            if(C_SUCCESS == return_status)
+            {
+                strncpy(measurand_uuid_out, new_uuid, C_UUID_LEN - 1U);
+                measurand_uuid_out[C_UUID_LEN - 1U] = '\0';
+            }
+        }
+
+        return(return_status);
+    }
+
+/*
+## gpm8310_find_sensor_uuid
+
+Scans `snon_path/sensors/` for a canonical sensor fragment whose `eR.child_of` array contains `urn:uuid:<device_uuid>`. On success, writes the sensor's bare UUID to `sensor_uuid_out`.
+
+Returns C_SUCCESS if a matching sensor is found, C_FAILURE if no match exists or if any I/O error occurs.
+
+### Interactions
+
+| Parameter       | Direction | Type        | Description                                                              |
+| --------------- | --------- | ----------- | ------------------------------------------------------------------------ |
+| snon_path       | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.                     |
+| device_uuid     | in        | const char* | Bare UUID of the parent device to match against eR.child_of.             |
+| sensor_uuid_out | out       | char*       | Receives the bare UUID of the matching sensor. Buffer must be at least   |
+|                 |           |             | C_UUID_LEN bytes. Not written on failure.                                |
+| return value    | out       | int32_t     | C_SUCCESS if found; C_FAILURE if not found or on any I/O error.          |
+
+Other changes to system state include:
+
+- Opens and closes each .json file in `snon_path/sensors/` until a match is found.
+
+*/
+
+    int32_t gpm8310_find_sensor_uuid(const char* snon_path, const char* device_uuid, char* sensor_uuid_out)
+    {
+        char            sensors_dir[PATH_MAX] = {0};
+        char            candidate_path[PATH_MAX + 1024] = {0};
+        char            device_urn[C_SNON_EID_LEN] = {0};
+        DIR*            dir_handle = NULL;
+        struct dirent*  dir_entry = NULL;
+        struct stat     stat_buf;
+        int32_t         file_fd = C_FAILURE;
+        ssize_t         bytes_read = 0;
+        char*           file_contents = NULL;
+        cJSON*          fragment_array = NULL;
+        cJSON*          fragment = NULL;
+        cJSON*          eid_item = NULL;
+        cJSON*          er_item = NULL;
+        cJSON*          child_of_array = NULL;
+        cJSON*          child_of_entry = NULL;
+        size_t          entry_len = 0U;
+        bool            found = false;
+        bool            scan_done = false;
+        int32_t         return_status = C_SUCCESS;
+
+        REQUIRES(NULL != snon_path, "snon_path is NULL");
+        REQUIRES(NULL != device_uuid, "device_uuid is NULL");
+        REQUIRES(NULL != sensor_uuid_out, "sensor_uuid_out is NULL");
+
+        snprintf(sensors_dir, sizeof(sensors_dir), "%ssensors/", snon_path);
+        snprintf(device_urn, sizeof(device_urn), "urn:uuid:%s", device_uuid);
+
+        dir_handle = opendir(sensors_dir);
+        if(NULL == dir_handle)
+        {
+            // ENOENT means no sensors have been created yet; return C_FAILURE (not found).
+            if(ENOENT != errno)
+            {
+                fprintf(stderr, "Error opening sensors directory: %s\n", sensors_dir);
+                perror("opendir");
+            }
+            return_status = C_FAILURE;
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            while(false == scan_done)
+            {
+                dir_entry = readdir(dir_handle);
+                if(NULL == dir_entry)
+                {
+                    scan_done = true;
+                }
+                else
+                {
+                    entry_len = strlen(dir_entry->d_name);
+
+                    // Only inspect regular .json files; skip dotfiles and directories.
+                    if((entry_len > C_JSON_EXT_LEN) && (0 == strcmp(dir_entry->d_name + entry_len - C_JSON_EXT_LEN, C_JSON_EXT)))
+                    {
+                        snprintf(candidate_path, sizeof(candidate_path), "%s%s", sensors_dir, dir_entry->d_name);
+
+                        file_fd = int32_from_int(open(candidate_path, O_RDONLY));
+                        if(C_FAILURE != file_fd)
+                        {
+                            if(C_SUCCESS == fstat(file_fd, &stat_buf))
+                            {
+                                file_contents = (char*)malloc((size_t)stat_buf.st_size + 1U);
+                                if(NULL != file_contents)
+                                {
+                                    bytes_read = read(file_fd, file_contents, (size_t)stat_buf.st_size);
+                                    if(bytes_read == (ssize_t)stat_buf.st_size)
+                                    {
+                                        file_contents[stat_buf.st_size] = '\0';
+                                        fragment_array = cJSON_Parse(file_contents);
+                                        if(NULL != fragment_array)
+                                        {
+                                            fragment = cJSON_GetArrayItem(fragment_array, 0);
+                                            if(NULL != fragment)
+                                            {
+                                                er_item = cJSON_GetObjectItem(fragment, "eR");
+                                                if(NULL != er_item)
+                                                {
+                                                    child_of_array = cJSON_GetObjectItem(er_item, "child_of");
+                                                    if(NULL != child_of_array)
+                                                    {
+                                                        child_of_entry = cJSON_GetArrayItem(child_of_array, 0);
+                                                        if((NULL != child_of_entry) && cJSON_IsString(child_of_entry) && (0 == strcmp(child_of_entry->valuestring, device_urn)))
+                                                        {
+                                                            eid_item = cJSON_GetObjectItem(fragment, "eID");
+                                                            if((NULL != eid_item) && cJSON_IsString(eid_item) && (0 == strncmp(eid_item->valuestring, "urn:uuid:", C_URN_UUID_PREFIX_LEN)))
+                                                            {
+                                                                strncpy(sensor_uuid_out, eid_item->valuestring + C_URN_UUID_PREFIX_LEN, C_UUID_LEN - 1U);
+                                                                sensor_uuid_out[C_UUID_LEN - 1U] = '\0';
+                                                                found = true;
+                                                                scan_done = true;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            cJSON_Delete(fragment_array);
+                                            fragment_array = NULL;
+                                        }
+                                    }
+                                    free(file_contents);
+                                    file_contents = NULL;
+                                }
+                            }
+                            close(file_fd);
+                            file_fd = C_FAILURE;
+                        }
+                    }
+                }
+            }
+            closedir(dir_handle);
+        }
+
+        if((C_SUCCESS == return_status) && (false == found))
+        {
+            return_status = C_FAILURE;
+        }
+
+        return(return_status);
+    }
+
+/*
+## gpm8310_create_snon_definitions
+
+Creates SNON 4.0 filesystem artefacts for the GPM-8310 device and its single watt-hour sensor, then creates a new series entity for this collection session. Returns the new series UUID via `series_uuid_out` for use by `gpm8310_collect_values`.
+
+The following artefacts are produced under `snon_path`:
+
+1. `devices/<device_uuid>.json` — device fragment. Skipped without error if already exists (Section 8.11).
+2. `devices/<device_uuid>/`, `devices/<device_uuid>/devices/`, `devices/<device_uuid>/sensors/` — device subdirectories (idempotent).
+3. `measurands/<measurand_uuid>.json` — "Cumulative Watt-Hours" measurand fragment, if none exists (Section 8.10).
+4. `sensors/<sensor_uuid>.json` — sensor fragment with `eR.child_of = device_uuid` and `eR.measurand`. Created only if no sensor with `child_of = device_uuid` already exists.
+5. `sensors/<sensor_uuid>/`, `sensors/<sensor_uuid>/values/`, `sensors/<sensor_uuid>/series/` — sensor subdirectories (idempotent).
+6. Symlink pair in `devices/<device_uuid>/sensors/` pointing to the sensor (idempotent, Section 8.7.1).
+7. `series/<series_uuid>.json` — series fragment with `eR.child_of = sensor_uuid` and `eR.measurand`. A new series is always created (one per session).
+8. `series/<series_uuid>/`, `series/<series_uuid>/values/` — series subdirectories.
+9. Symlink pair in `sensors/<sensor_uuid>/series/` pointing to the new series (Section 8.7.1).
+
+### Interactions
+
+| Parameter       | Direction | Type        | Description                                                              |
+| --------------- | --------- | ----------- | ------------------------------------------------------------------------ |
+| snon_path       | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.                     |
+| device_uuid     | in        | const char* | UUID string identifying the device. Must not be NULL.                    |
+| series_uuid_out | out       | char*       | Receives the newly created series UUID. Buffer must be C_UUID_LEN bytes. |
+| return value    | out       | int32_t     | C_SUCCESS on success; C_FAILURE on any I/O or allocation error.          |
+
+Other changes to system state include:
+
+- Creates directories and files in the SNON directory tree as listed above.
+
+*/
+
+    int32_t gpm8310_create_snon_definitions(const char* snon_path, const char* device_uuid, char* series_uuid_out)
+    {
+        char        snon_fpath[PATH_MAX] = {0};
+        char        snon_dpath[PATH_MAX] = {0};
+        char        link_dir[PATH_MAX] = {0};
+        char        rel_file_target[PATH_MAX] = {0};
+        char        rel_dir_target[PATH_MAX] = {0};
+        int32_t     snon_fd = C_FAILURE;
+        cJSON*      snon_root = NULL;
+        cJSON*      entity_obj = NULL;
+        cJSON*      relation_object = NULL;
+        cJSON*      relation_array = NULL;
+        char        sensor_uuid[C_UUID_LEN] = {0};
+        char        series_uuid[C_UUID_LEN] = {0};
+        char        measurand_uuid[C_UUID_LEN] = {0};
+        char        working_string[1024] = {0};
+        char*       snon_output = NULL;
+        size_t      output_len = 0U;
+        ssize_t     bytes_written = 0;
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != snon_path, "snon_path is NULL");
+        REQUIRES(NULL != device_uuid, "device_uuid is NULL");
+        REQUIRES(is_valid_uuid(device_uuid), "device_uuid is not a valid UUID");
+        REQUIRES(NULL != series_uuid_out, "series_uuid_out is NULL");
+
+        // ---------------------------------------------------------------
+        // Device canonical fragment file (Section 8.5).
+        // O_EXCL enforces the Section 8.11 rule that canonical files must
+        // not be overwritten. EEXIST means the record already exists;
+        // treat as success and proceed so that subsequent steps remain
+        // idempotent.
+        snprintf(snon_fpath, sizeof(snon_fpath), "%sdevices/%s.json", snon_path, device_uuid);
+        snon_fd = int32_from_int(open(snon_fpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+
+        if(C_FAILURE == snon_fd)
+        {
+            if(EEXIST != errno)
+            {
+                fprintf(stderr, "Error creating SNON device record file: %s\n", snon_fpath);
+                perror("open");
+                return_status = C_FAILURE;
+            }
+        }
+
+        // Only write when we hold a newly created file descriptor; skip if EEXIST.
+        if((C_SUCCESS == return_status) && (C_FAILURE != snon_fd))
+        {
+            snon_root = cJSON_CreateArray();
+            ASSERT(NULL != snon_root, "cJSON_CreateArray() returned NULL; memory exhausted");
+
+            entity_obj = cJSON_CreateObject();
+            ASSERT(NULL != entity_obj, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
+            cJSON_AddItemToObjectCS(entity_obj, "eID", cJSON_CreateString(working_string));
+            cJSON_AddItemToObjectCS(entity_obj, "eC",  cJSON_CreateString("device"));
+            snon_addname(entity_obj, "eN", "*", "GPM-8310 Power Analyzer");
+            cJSON_AddItemToArray(snon_root, entity_obj);
+
+            snon_output = cJSON_PrintUnformatted(snon_root);
+            ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
+
+            output_len = strlen(snon_output);
+            bytes_written = write(snon_fd, snon_output, output_len);
+
+            // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with output_len, safe because bytes_written is checked for < 0 first
+            if((bytes_written < 0) || ((size_t)bytes_written != output_len))
+            {
+                fprintf(stderr, "Error writing SNON device record\n");
                 perror("write");
                 return_status = C_FAILURE;
             }
 
             cJSON_free(snon_output);
+            cJSON_Delete(snon_root);
             close(snon_fd);
+            snon_fd = C_FAILURE;
         }
 
-        cJSON_Delete(senml_data);
+        // Device canonical subdirectory and relationship directories (Sections 8.5, 8.8).
+        // gpm8310_make_dir_if_missing treats EEXIST as success.
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sdevices/%s", snon_path, device_uuid);
+            return_status = gpm8310_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sdevices/%s/devices", snon_path, device_uuid);
+            return_status = gpm8310_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sdevices/%s/sensors", snon_path, device_uuid);
+            return_status = gpm8310_make_dir_if_missing(snon_dpath);
+        }
+
+        // ---------------------------------------------------------------
+        // Resolve the shared measurand for both the sensor and the series.
+        if(C_SUCCESS == return_status)
+        {
+            return_status = gpm8310_ensure_measurand(snon_path, "Cumulative Watt-Hours", measurand_uuid);
+        }
+
+        // ---------------------------------------------------------------
+        // Sensor: find the existing sensor for this device, or create one.
+        // The GPM-8310 has exactly one watt-hour output, so there is at
+        // most one sensor per device UUID.
+        if(C_SUCCESS == return_status)
+        {
+            if(C_FAILURE == gpm8310_find_sensor_uuid(snon_path, device_uuid, sensor_uuid))
+            {
+                // No sensor exists yet for this device; create one now.
+                if(C_FAILURE == generate_random_uuid(sensor_uuid))
+                {
+                    fprintf(stderr, "Error generating random UUID for sensor\n");
+                    return_status = C_FAILURE;
+                }
+
+                if(C_SUCCESS == return_status)
+                {
+                    snprintf(snon_fpath, sizeof(snon_fpath), "%ssensors/%s.json", snon_path, sensor_uuid);
+                    snon_fd = int32_from_int(open(snon_fpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+                    if(C_FAILURE == snon_fd)
+                    {
+                        fprintf(stderr, "Error creating SNON sensor record file: %s\n", snon_fpath);
+                        perror("open");
+                        return_status = C_FAILURE;
+                    }
+                }
+
+                if(C_SUCCESS == return_status)
+                {
+                    snon_root = cJSON_CreateArray();
+                    ASSERT(NULL != snon_root, "cJSON_CreateArray() returned NULL; memory exhausted");
+
+                    entity_obj = cJSON_CreateObject();
+                    ASSERT(NULL != entity_obj, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+                    snprintf(working_string, sizeof(working_string), "urn:uuid:%s", sensor_uuid);
+                    cJSON_AddItemToObjectCS(entity_obj, "eID", cJSON_CreateString(working_string));
+                    cJSON_AddItemToObjectCS(entity_obj, "eC",  cJSON_CreateString("sensor"));
+                    snon_addname(entity_obj, "eN", "*", "Cumulative Watt-Hours");
+
+                    // eR: child_of device (Section 8.9) and measurand reference (Section 8.10).
+                    relation_object = cJSON_CreateObject();
+                    ASSERT(NULL != relation_object, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+                    relation_array = cJSON_CreateArray();
+                    ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+                    snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
+                    cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+                    cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
+
+                    relation_array = cJSON_CreateArray();
+                    ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+                    snprintf(working_string, sizeof(working_string), "urn:uuid:%s", measurand_uuid);
+                    cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+                    cJSON_AddItemToObjectCS(relation_object, "measurand", relation_array);
+
+                    cJSON_AddItemToObjectCS(entity_obj, "eR", relation_object);
+                    cJSON_AddItemToArray(snon_root, entity_obj);
+
+                    snon_output = cJSON_PrintUnformatted(snon_root);
+                    ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
+
+                    output_len = strlen(snon_output);
+                    bytes_written = write(snon_fd, snon_output, output_len);
+
+                    // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with output_len, safe because bytes_written is checked for < 0 first
+                    if((bytes_written < 0) || ((size_t)bytes_written != output_len))
+                    {
+                        fprintf(stderr, "Error writing SNON sensor record\n");
+                        perror("write");
+                        return_status = C_FAILURE;
+                    }
+
+                    cJSON_free(snon_output);
+                    cJSON_Delete(snon_root);
+                    close(snon_fd);
+                    snon_fd = C_FAILURE;
+                }
+            }
+            // else: sensor_uuid was populated by gpm8310_find_sensor_uuid.
+        }
+
+        // Sensor canonical subdirectory, values/, and series/ (Sections 8.5, 8.9).
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%ssensors/%s", snon_path, sensor_uuid);
+            return_status = gpm8310_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%ssensors/%s/values", snon_path, sensor_uuid);
+            return_status = gpm8310_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%ssensors/%s/series", snon_path, sensor_uuid);
+            return_status = gpm8310_make_dir_if_missing(snon_dpath);
+        }
+
+        // Symlink pair in devices/<device_uuid>/sensors/ pointing to the sensor.
+        // The link directory is 3 levels below snon_path (devices/<D>/sensors/),
+        // so the relative prefix is ../../../ (Section 8.7.1).
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(link_dir, sizeof(link_dir), "%sdevices/%s/sensors/", snon_path, device_uuid);
+            snprintf(rel_file_target, sizeof(rel_file_target), "../../../sensors/%s.json", sensor_uuid);
+            snprintf(rel_dir_target,  sizeof(rel_dir_target),  "../../../sensors/%s",      sensor_uuid);
+            return_status = gpm8310_create_symlink_pair(link_dir, sensor_uuid, rel_file_target, rel_dir_target);
+        }
+
+        // ---------------------------------------------------------------
+        // Series: always create a new entity for this collection session.
+        // Each run of the daemon integrates from reset, making each session
+        // a logically distinct series (Section 8.9).
+        if(C_SUCCESS == return_status)
+        {
+            if(C_FAILURE == generate_random_uuid(series_uuid))
+            {
+                fprintf(stderr, "Error generating random UUID for series\n");
+                return_status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_fpath, sizeof(snon_fpath), "%sseries/%s.json", snon_path, series_uuid);
+            snon_fd = int32_from_int(open(snon_fpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+            if(C_FAILURE == snon_fd)
+            {
+                fprintf(stderr, "Error creating SNON series record file: %s\n", snon_fpath);
+                perror("open");
+                return_status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snon_root = cJSON_CreateArray();
+            ASSERT(NULL != snon_root, "cJSON_CreateArray() returned NULL; memory exhausted");
+
+            entity_obj = cJSON_CreateObject();
+            ASSERT(NULL != entity_obj, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", series_uuid);
+            cJSON_AddItemToObjectCS(entity_obj, "eID", cJSON_CreateString(working_string));
+            cJSON_AddItemToObjectCS(entity_obj, "eC",  cJSON_CreateString(C_SNON_SERIES_CLASS));
+            snon_addname(entity_obj, "eN", "*", "Cumulative Watt-Hours");
+
+            // eR: child_of the parent sensor (Section 8.9) and measurand reference (Section 8.10).
+            relation_object = cJSON_CreateObject();
+            ASSERT(NULL != relation_object, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+            relation_array = cJSON_CreateArray();
+            ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", sensor_uuid);
+            cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+            cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
+
+            relation_array = cJSON_CreateArray();
+            ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", measurand_uuid);
+            cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+            cJSON_AddItemToObjectCS(relation_object, "measurand", relation_array);
+
+            cJSON_AddItemToObjectCS(entity_obj, "eR", relation_object);
+            cJSON_AddItemToArray(snon_root, entity_obj);
+
+            snon_output = cJSON_PrintUnformatted(snon_root);
+            ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
+
+            output_len = strlen(snon_output);
+            bytes_written = write(snon_fd, snon_output, output_len);
+
+            // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with output_len, safe because bytes_written is checked for < 0 first
+            if((bytes_written < 0) || ((size_t)bytes_written != output_len))
+            {
+                fprintf(stderr, "Error writing SNON series record\n");
+                perror("write");
+                return_status = C_FAILURE;
+            }
+
+            cJSON_free(snon_output);
+            cJSON_Delete(snon_root);
+            close(snon_fd);
+            snon_fd = C_FAILURE;
+        }
+
+        // Series canonical subdirectory and values/ (Sections 8.5, 8.6).
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sseries/%s", snon_path, series_uuid);
+            return_status = gpm8310_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sseries/%s/values", snon_path, series_uuid);
+            return_status = gpm8310_make_dir_if_missing(snon_dpath);
+        }
+
+        // Symlink pair in sensors/<sensor_uuid>/series/ pointing to the new series.
+        // The link directory is 3 levels below snon_path (sensors/<S>/series/),
+        // so the relative prefix is ../../../ (Section 8.7.1).
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(link_dir, sizeof(link_dir), "%ssensors/%s/series/", snon_path, sensor_uuid);
+            snprintf(rel_file_target, sizeof(rel_file_target), "../../../series/%s.json", series_uuid);
+            snprintf(rel_dir_target,  sizeof(rel_dir_target),  "../../../series/%s",      series_uuid);
+            return_status = gpm8310_create_symlink_pair(link_dir, series_uuid, rel_file_target, rel_dir_target);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            strncpy(series_uuid_out, series_uuid, C_UUID_LEN - 1U);
+            series_uuid_out[C_UUID_LEN - 1U] = '\0';
+        }
 
         return(return_status);
     }
-
-
 
 /*
 ## Send an SCPI command to the power meter
@@ -718,21 +1795,16 @@ int32_t gpm8310_instrument_identify(int32_t socket_fd)
 /*
 ## Configure GPM-8310 for energy accumulation
 
-`gpm8310_instrument_configure` sends the sequence of SCPI commands that prepare the
-GPM-8310 for watt-hour accumulation. Each command is sent only if all preceding
-commands succeeded, so the first failure stops the sequence immediately.
+`gpm8310_instrument_configure` sends the sequence of SCPI commands that prepare the GPM-8310 for watt-hour accumulation. Each command is sent only if all preceding commands succeeded, so the first failure stops the sequence immediately.
 
 The commands issued are:
 
 1. `*CLS` - clear the status registers and error queue.
 2. `:RATE 100MS` - set the internal measurement period to 100 ms.
 3. `:INTEGrate:FUNCtion WATThour` - select watt-hour as the integrated quantity.
-4. `:INTEGrate:MODE MANual` - set the integrator to run until `:INTEGrate:STOP`
-   is issued, rather than for a fixed time.
+4. `:INTEGrate:MODE MANual` - set the integrator to run until `:INTEGrate:STOP` is issued, rather than for a fixed time.
 5. `:INTEGrate:RESet` - zero any previously accumulated energy.
-6. `:NUMeric:NORMal:ITEM1 WH` - bind numeric read-slot 1 to total Wh. Additional
-   slots can be mapped to `WHP` (positive Wh only), `WHM` (negative Wh only), or
-   `AH` (total ampere-hours) if needed by future callers.
+6. `:NUMeric:NORMal:ITEM1 WH` - bind numeric read-slot 1 to total Wh. Additional slots can be mapped to `WHP` (positive Wh only), `WHM` (negative Wh only), or `AH` (total ampere-hours) as needed.
 7. `:INTEGrate:STARt` - begin accumulation.
 
 After a successful return the instrument integrator is running.
@@ -747,8 +1819,7 @@ After a successful return the instrument integrator is running.
 Other changes to system state include:
 
 - Sends seven SCPI configuration commands to the instrument.
-- After a successful return, the instrument integrator is running and energy is
-  being accumulated into slot 1 (total Wh).
+- After a successful return, the instrument integrator is running and energy is being accumulated into slot 1 (total Wh).
 
 */
 int32_t gpm8310_instrument_configure(int32_t socket_fd)
@@ -818,8 +1889,7 @@ int32_t gpm8310_instrument_configure(int32_t socket_fd)
 Other changes to system state include:
 
 - Opens a TCP socket and configures it for SCPI communication.
-- On success, the instrument integrator is running; the caller must call
-  `gpm8310_disconnect` to stop it and close the socket.
+- On success, the instrument integrator is running; the caller must call `gpm8310_disconnect` to stop it and close the socket.
 
 */
 int32_t gpm8310_connect(const char* dest_host_name, const char* dest_port_num)
@@ -992,14 +2062,9 @@ int32_t gpm8310_disconnect(int32_t socket_fd)
 /*
 ## Format the current UTC time as an ISO 8601 microsecond-precision string
 
-Reads the current real-time clock via clock_gettime(CLOCK_REALTIME),
-converts the result to broken-down UTC time using gmtime_r, and writes a
-null-terminated timestamp string in the format `YYYY-MM-DDTHH:MM:SS.ffffffZ`
-into the caller-supplied buffer.
+Reads the current real-time clock via clock_gettime(CLOCK_REALTIME), converts the result to broken-down UTC time using gmtime_r, and writes a null-terminated timestamp string in the format `YYYY-MM-DDTHH:MM:SS.ffffffZ` into the caller-supplied buffer.
 
-The buffer must be at least `C_ISO8601_LEN` (28) bytes. The trailing `Z`
-denotes UTC. The sub-second field `ffffff` is derived from the timespec
-nanosecond component: $\lfloor tv\_nsec \div 1000 \rfloor$.
+The buffer must be at least `C_ISO8601_LEN` (28) bytes. The trailing `Z` denotes UTC. The sub-second field `ffffff` is derived from the timespec nanosecond component: $\lfloor tv\_nsec \div 1000 \rfloor$.
 
 ### Interactions
 
@@ -1041,14 +2106,9 @@ Other changes to system state include:
 /*
 ## Handle SIGINT and pass through all other signals
 
-Installed as the SIGINT action by hxi_collect_values. On receipt of
-SIGINT, sets the global g_abort_collect flag to true, which causes the
-collection loop to exit cleanly after its current polling iteration
-completes.
+Installed as the SIGINT action by hxi_collect_values. On receipt of SIGINT, sets the global g_abort_collect flag to true, which causes the collection loop to exit cleanly after its current polling iteration completes.
 
-For any other signal, the handler restores the default system disposition
-via sigaction and immediately re-raises the signal, allowing the process
-to behave as if the custom handler had never been installed.
+For any other signal, the handler restores the default system disposition via sigaction and immediately re-raises the signal, allowing the process to behave as if the custom handler had never been installed.
 
 ### Interactions
 
@@ -1060,9 +2120,7 @@ to behave as if the custom handler had never been installed.
 
 Other changes to system state include:
 
-- For signals other than SIGINT: calls sigaction(signum, SIG_DFL) to restore the
-  default handler, then raise(signum) to re-deliver the signal, which may terminate
-  the process or produce a core dump depending on the signal.
+- For signals other than SIGINT: calls sigaction(signum, SIG_DFL) to restore the default handler, then raise(signum) to re-deliver the signal, which may terminate the process or produce a core dump depending on the signal.
 
 */
 
@@ -1070,7 +2128,7 @@ Other changes to system state include:
     static void signal_handler(int signum)
     {
         struct sigaction    signal_action = {0};
-        
+
         if(SIGINT == signum)
         {
             // Set an abort flag for sigint
