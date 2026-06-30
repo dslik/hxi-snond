@@ -4,7 +4,7 @@
 
 Polls and writes sensor data from a GW Instek GPM-8310 power meter.
 
-Sensor data is written in <a href="https://www.snon.org/">SNON 4</a> format. The daemon opens a TCP/IP connection to the power meter, configures power integration, creates initial SNON device, sensor, series, and measurand records on first run, then enters a continuous polling loop until SIGINT. All readings are accumulated in memory and written as a single SNON value fragment at the end of the session.
+Sensor data is written in <a href="https://www.snon.org/">SNON 4</a> format. The daemon opens a TCP/IP connection to the power meter, configures power integration, creates initial SNON device, sensor, series, and measurand records on first run, then enters a continuous polling loop until SIGINT. Each poll reads four quantities from the instrument in a single SCPI query: cumulative watt-hours, voltage, current, and wattage. Each quantity has its own measurand, sensor, and series; all readings are accumulated in memory and written as four separate SNON value fragments at the end of the session.
 
 Known issues:
 
@@ -71,6 +71,18 @@ Constants for connecting to the device and for device control using the SCPI pro
     #define C_POLL_INTERVAL_NS          23000000L       // 23 ms in nanoseconds
     #define C_NS_PER_SECOND             1000000000      // 1 s in nanoseconds
 
+    // Tracked measurands
+    // The GPM-8310 :NUMeric:NORMal:ITEM<x> command uses U/I/P/WH as its
+    // function mnemonics for voltage, current, active power, and total
+    // watt-hours respectively (GPM-8310 User Manual Rev. C, Command List,
+    // Section ":NUMeric[:NORMal]:ITEM<x>"). These are distinct from the
+    // physical units (V, A, W, Wh) stored in each measurand's "meU" field.
+    #define C_MEASURAND_COUNT           4U              // Number of quantities polled and tracked per session
+    #define C_MEASURAND_WH              0U              // Index of the cumulative watt-hours measurand
+    #define C_MEASURAND_VOLTAGE         1U              // Index of the voltage measurand
+    #define C_MEASURAND_CURRENT         2U              // Index of the current measurand
+    #define C_MEASURAND_WATTAGE         3U              // Index of the wattage (active power) measurand
+
     // ISO 8601 timestamp
     #define C_ISO8601_LEN               28U             // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
 
@@ -92,19 +104,42 @@ Constants for connecting to the device and for device control using the SCPI pro
     #define C_JSON_EXT_LEN              5U              // Byte length of C_JSON_EXT (no null)
 
 /*
+### Project types
+
+Local types
+*/
+
+    // Static definition of a tracked measurand: its human-readable name
+    // (shared by its measurand, sensor, and series entities) and its SNON
+    // "meU" physical unit string.
+    typedef struct
+    {
+        const char* name;
+        const char* unit;
+    } gpm8310_measurand_def_t;
+
+    // Holds the per-session series UUID created for each tracked measurand,
+    // indexed by the C_MEASURAND_* constants.
+    typedef struct
+    {
+        char uuid[C_MEASURAND_COUNT][C_UUID_LEN];
+    } gpm8310_series_set_t;
+
+/*
 ### Project prototypes
 
 Local functions
 */
 
     int main(int argc, char* argv[]);
-    int32_t gpm8310_collect_values(const char* snon_path, int32_t dev_fd, const char* series_uuid);
+    int32_t gpm8310_collect_values(const char* snon_path, int32_t dev_fd, const gpm8310_series_set_t* series_set);
 
     // SNON filesystem layout helpers (Section 8)
     int32_t snon_validate_dir(const char* snon_path, int32_t mode);
-    int32_t gpm8310_create_snon_definitions(const char* snon_path, const char* device_uuid, char* series_uuid_out);
-    int32_t gpm8310_find_sensor_uuid(const char* snon_path, const char* device_uuid, char* sensor_uuid_out);
-    int32_t gpm8310_ensure_measurand(const char* snon_path, const char* measurand_name, char* measurand_uuid_out);
+    int32_t gpm8310_create_snon_definitions(const char* snon_path, const char* device_uuid, gpm8310_series_set_t* series_set_out);
+    int32_t gpm8310_create_measurand_chain(const char* snon_path, const char* device_uuid, const char* measurand_name, const char* measurand_unit, char* series_uuid_out);
+    int32_t gpm8310_find_sensor_uuid(const char* snon_path, const char* device_uuid, const char* measurand_uuid, char* sensor_uuid_out);
+    int32_t gpm8310_ensure_measurand(const char* snon_path, const char* measurand_name, const char* measurand_unit, char* measurand_uuid_out);
     int32_t gpm8310_make_dir_if_missing(const char* path);
     int32_t gpm8310_create_symlink_pair(const char* link_dir, const char* uuid, const char* rel_file_target, const char* rel_dir_target);
     void    snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name);
@@ -122,7 +157,7 @@ Local functions
     int32_t gpm8310_connect(const char* dest_host_name, const char* dest_port_num);
     int32_t gpm8310_instrument_identify(int32_t socket_fd);
     int32_t gpm8310_instrument_configure(int32_t socket_fd);
-    int32_t gpm8310_read_wh(int32_t socket_fd, double* wh_out);
+    int32_t gpm8310_read_measurements(int32_t socket_fd, double* wh_out, double* voltage_out, double* current_out, double* wattage_out);
     int32_t gpm8310_disconnect(int32_t socket_fd);
 
     // ASDFG-C 6.18 VIOLATION: POSIX sigaction handler signature requires int signum; no fixed-width alternative
@@ -149,6 +184,17 @@ Global variables
 
     static volatile sig_atomic_t g_abort_collect = false;
 
+    // Static definitions for the four quantities tracked each session, indexed
+    // by the C_MEASURAND_* constants. Each entry's name is shared by its
+    // measurand, sensor, and series entities; unit is the SNON "meU" value.
+    static const gpm8310_measurand_def_t g_measurand_defs[C_MEASURAND_COUNT] =
+    {
+        { "Cumulative Watt-Hours", "Wh" },
+        { "Voltage",               "V"  },
+        { "Current",               "A"  },
+        { "Wattage",               "W"  }
+    };
+
 /*
 ## GPM 8310 sensor daemon entry point
 
@@ -166,10 +212,11 @@ The daemon runs until it receives a SIGINT signal, at which point the signal han
 
 Other changes to system state include:
 
-- Creates `devices/<uuid>.json` and `sensors/<uuid>.json` on first run; skipped without error on subsequent runs.
-- Creates `measurands/<uuid>.json` for "Cumulative Watt-Hours" on first run; skipped if it already exists.
-- Creates a new `series/<uuid>.json` and `series/<uuid>/values/` on every run (one series per session).
-- Creates relative symlink pairs linking the device to the sensor and the sensor to the series (Section 8.7).
+- Creates `devices/<uuid>.json` on first run; skipped without error on subsequent runs.
+- Creates `measurands/<uuid>.json` for each of "Cumulative Watt-Hours", "Voltage", "Current", and "Wattage" on first run; skipped if a measurand already exists.
+- Creates `sensors/<uuid>.json` for each of the four measurands on first run, one per device/measurand pair; skipped without error on subsequent runs.
+- Creates a new `series/<uuid>.json` and `series/<uuid>/values/` for each of the four measurands on every run (one series per measurand per session).
+- Creates relative symlink pairs linking the device to each sensor and each sensor to its series (Section 8.7).
 - Opens and closes a TCP/IP connection to the host specified by -a and the port specified by -p.
 
 */
@@ -182,7 +229,7 @@ Other changes to system state include:
         const char*             snon_path = "./snon/";
         const char*             uuid_arg = NULL;
         char                    device_uuid[C_UUID_LEN] = {0};
-        char                    series_uuid[C_UUID_LEN] = {0};
+        gpm8310_series_set_t    series_set = {0};
         int32_t                 dev_fd = 0;
 
         // Obtain command line arguments
@@ -276,10 +323,11 @@ Other changes to system state include:
         }
 
         // ===========================================================
-        // Create SNON entity records for this device and obtain the series UUID
-        // for this session. Device and sensor records are created only on the
-        // first run; a new series is created on every run (one per session).
-        if(C_FAILURE == gpm8310_create_snon_definitions(snon_path, device_uuid, series_uuid))
+        // Create SNON entity records for this device and obtain the per-measurand
+        // series UUIDs for this session. Device, measurand, and sensor records are
+        // created only on the first run; a new series is created for each measurand
+        // on every run (one set per session).
+        if(C_FAILURE == gpm8310_create_snon_definitions(snon_path, device_uuid, &series_set))
         {
             fprintf(stderr, "Error creating SNON definition records\n");
             gpm8310_disconnect(dev_fd);
@@ -287,8 +335,8 @@ Other changes to system state include:
         }
 
         // ===========================================================
-        // Collect GPM 8310 watt-hour readings and write them to the SNON tree
-        if(C_FAILURE == gpm8310_collect_values(snon_path, dev_fd, series_uuid))
+        // Collect GPM 8310 readings and write them to the SNON tree
+        if(C_FAILURE == gpm8310_collect_values(snon_path, dev_fd, &series_set))
         {
             fprintf(stderr, "Error writing SNON value record\n");
             gpm8310_disconnect(dev_fd);
@@ -300,31 +348,33 @@ Other changes to system state include:
     }
 
 /*
-## Collect GPM-8310 watt-hour values
+## Collect GPM-8310 measurements
 
-Accumulates watt-hour readings from the GPM-8310 into a single in-memory SNON value fragment, then writes the fragment to disk as one timestamped value file when the session ends.
+Accumulates watt-hour, voltage, current, and wattage readings from the GPM-8310 into four in-memory SNON value fragments (one per measurand), then writes each fragment to disk as a timestamped value file when the session ends.
 
-Installs a SIGINT handler that sets `g_abort_collect`, causing the polling loop to exit cleanly. On exit the handler is unregistered. The accumulated fragment is written to `series/<series_uuid>/values/<start_timestamp>.json`, where `<start_timestamp>` is the ISO 8601 UTC timestamp of the first poll with colons replaced by hyphens (Section 8.6). The file is written even if a read error interrupted the session, provided at least one reading was captured before the error.
+Each polling iteration sends a single `:NUMeric:VALue?` query (via `gpm8310_read_measurements`) that returns all four readings together, so the four per-measurand `v`/`vT` arrays always share the same timestamp at a given poll index.
+
+Installs a SIGINT handler that sets `g_abort_collect`, causing the polling loop to exit cleanly. On exit the handler is unregistered. Each fragment is written to `series/<series_set->uuid[i]>/values/<start_timestamp>.json`, where `<start_timestamp>` is the ISO 8601 UTC timestamp of the first poll with colons replaced by hyphens (Section 8.6), shared by all four files. Files are written even if a read error interrupted the session, provided at least one reading was captured before the error; writes for one measurand are attempted independently of the outcome for another.
 
 ### Interactions
 
-| Parameter       | Direction | Type         | Description                                                              |
-| --------------- | --------- | ------------ | ------------------------------------------------------------------------ |
-| snon_path       | in        | const char*  | SNON root path. Must not be NULL. Must end with '/'.                     |
-| dev_fd          | in        | int32_t      | Connected socket file descriptor returned by `gpm8310_connect`.          |
-| series_uuid     | in        | const char*  | UUID of the series entity whose `eID` appears in the value fragment.     |
-| return value    | out       | int32_t      | C_SUCCESS on clean exit; C_FAILURE on any I/O or device error.           |
-| g_abort_collect | shared    | sig_atomic_t | Global flag; polled each iteration; written true by signal_handler.      |
+| Parameter       | Direction | Type                  | Description                                                              |
+| --------------- | --------- | --------------------- | ------------------------------------------------------------------------ |
+| snon_path       | in        | const char*           | SNON root path. Must not be NULL. Must end with '/'.                     |
+| dev_fd          | in        | int32_t               | Connected socket file descriptor returned by `gpm8310_connect`.          |
+| series_set      | in        | const gpm8310_series_set_t* | Per-measurand series UUIDs whose `eID` appears in each value fragment. |
+| return value    | out       | int32_t               | C_SUCCESS on clean exit; C_FAILURE on any I/O or device error.           |
+| g_abort_collect | shared    | sig_atomic_t          | Global flag; polled each iteration; written true by signal_handler.      |
 
 Other changes to system state include:
 
 - Installs and restores the SIGINT handler via sigaction with SA_RESTART.
-- Creates one JSON file at `series/<series_uuid>/values/<timestamp>.json`.
+- Creates up to C_MEASURAND_COUNT JSON files, one at `series/<uuid>/values/<timestamp>.json` per measurand.
 - Calls nanosleep between successful poll iterations to maintain the C_POLL_INTERVAL_NS cadence.
 
 */
 
-    int32_t gpm8310_collect_values(const char* snon_path, int32_t dev_fd, const char* series_uuid)
+    int32_t gpm8310_collect_values(const char* snon_path, int32_t dev_fd, const gpm8310_series_set_t* series_set)
     {
         struct sigaction    signal_action = {0};
         struct sigaction    old_signal_action = {0};
@@ -332,16 +382,16 @@ Other changes to system state include:
         struct timespec     poll_start = {0};
         struct timespec     poll_end = {0};
         struct timespec     sleep_duration = {0};
-        double              wh_value = 0.0;
+        double              readings[C_MEASURAND_COUNT] = {0};
         char                timestamp[C_ISO8601_LEN] = {0};
         char                first_timestamp[C_ISO8601_LEN] = {0};
         int64_t             poll_start_nsec = 0;
         int64_t             poll_end_nsec = 0;
         int64_t             remaining_ns = 0;
         int32_t             return_status = C_SUCCESS;
-        cJSON*              snon_array = NULL;
+        cJSON*              snon_array[C_MEASURAND_COUNT] = {0};
         cJSON*              snon_entry = NULL;
-        cJSON*              v_array = NULL;
+        cJSON*              v_array[C_MEASURAND_COUNT] = {0};
         cJSON*              vt_array = NULL;
         char                snon_dpath[PATH_MAX] = {0};
         char                eid_string[C_SNON_EID_LEN] = {0};
@@ -351,33 +401,41 @@ Other changes to system state include:
         size_t              data_len = 0U;
         ssize_t             data_written_len = 0;
         bool                first_poll = true;
+        uint32_t            measurand_index = 0U;
 
         REQUIRES(NULL != snon_path, "NULL pointer passed for snon_path");
-        REQUIRES(NULL != series_uuid, "NULL pointer passed for series_uuid");
+        REQUIRES(NULL != series_set, "NULL pointer passed for series_set");
         REQUIRES(dev_fd >= 0, "Invalid file descriptor %d", dev_fd);
 
-        // Build the single SNON value fragment that accumulates all readings for
-        // this session. The outer array holds exactly one fragment object; the
-        // eID references the series entity (Section 8.9). The v and vT arrays
-        // are left empty here and populated during the polling loop below.
-        snon_array = cJSON_CreateArray();
-        ASSERT(NULL != snon_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+        // Build the four SNON value fragments that accumulate all readings for
+        // this session, one per tracked measurand. Each outer array holds
+        // exactly one fragment object; the eID references that measurand's
+        // series entity (Section 8.9). The v and vT arrays are left empty
+        // here and populated during the polling loop below.
+        measurand_index = 0U;
+        while(measurand_index < C_MEASURAND_COUNT)
+        {
+            snon_array[measurand_index] = cJSON_CreateArray();
+            ASSERT(NULL != snon_array[measurand_index], "cJSON_CreateArray() returned NULL; memory exhausted");
 
-        snon_entry = cJSON_CreateObject();
-        ASSERT(NULL != snon_entry, "cJSON_CreateObject() returned NULL; memory exhausted");
+            snon_entry = cJSON_CreateObject();
+            ASSERT(NULL != snon_entry, "cJSON_CreateObject() returned NULL; memory exhausted");
 
-        snprintf(eid_string, sizeof(eid_string), "urn:uuid:%s", series_uuid);
-        cJSON_AddItemToObjectCS(snon_entry, "eID", cJSON_CreateString(eid_string));
+            snprintf(eid_string, sizeof(eid_string), "urn:uuid:%s", series_set->uuid[measurand_index]);
+            cJSON_AddItemToObjectCS(snon_entry, "eID", cJSON_CreateString(eid_string));
 
-        v_array = cJSON_CreateArray();
-        ASSERT(NULL != v_array, "cJSON_CreateArray() returned NULL; memory exhausted");
-        cJSON_AddItemToObject(snon_entry, "v", v_array);
+            v_array[measurand_index] = cJSON_CreateArray();
+            ASSERT(NULL != v_array[measurand_index], "cJSON_CreateArray() returned NULL; memory exhausted");
+            cJSON_AddItemToObject(snon_entry, "v", v_array[measurand_index]);
 
-        vt_array = cJSON_CreateArray();
-        ASSERT(NULL != vt_array, "cJSON_CreateArray() returned NULL; memory exhausted");
-        cJSON_AddItemToObject(snon_entry, "vT", vt_array);
+            vt_array = cJSON_CreateArray();
+            ASSERT(NULL != vt_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+            cJSON_AddItemToObject(snon_entry, "vT", vt_array);
 
-        cJSON_AddItemToArray(snon_array, snon_entry);
+            cJSON_AddItemToArray(snon_array[measurand_index], snon_entry);
+
+            measurand_index = measurand_index + 1U;
+        }
 
         signal_action.sa_handler = signal_handler;
         signal_action.sa_flags = SA_RESTART;
@@ -410,7 +468,10 @@ Other changes to system state include:
                     first_poll = false;
                 }
 
-                if(C_FAILURE == gpm8310_read_wh(dev_fd, &wh_value))
+                // Single combined query: all four readings come back from one
+                // :NUMeric:VALue? round trip, keeping each poll iteration well
+                // within the C_POLL_INTERVAL_NS cadence.
+                if(C_FAILURE == gpm8310_read_measurements(dev_fd, &readings[C_MEASURAND_WH], &readings[C_MEASURAND_VOLTAGE], &readings[C_MEASURAND_CURRENT], &readings[C_MEASURAND_WATTAGE]))
                 {
                     fprintf(stderr, "gpm8310_collect_values: read failed; stopping collection\n");
                     return_status = C_FAILURE;
@@ -418,11 +479,19 @@ Other changes to system state include:
                 }
                 else
                 {
-                    // ASDFG-C 6.23 VIOLATION: wh_value is double; formatted as a string
-                    // to match the SNON v array convention used throughout this codebase
-                    snprintf(num_str, sizeof(num_str), "%g", wh_value);
-                    cJSON_AddItemToArray(v_array, cJSON_CreateString(num_str));
-                    cJSON_AddItemToArray(vt_array, cJSON_CreateString(timestamp));
+                    measurand_index = 0U;
+                    while(measurand_index < C_MEASURAND_COUNT)
+                    {
+                        // ASDFG-C 6.23 VIOLATION: readings[] entries are double; formatted as a
+                        // string to match the SNON v array convention used throughout this codebase
+                        snprintf(num_str, sizeof(num_str), "%g", readings[measurand_index]);
+                        cJSON_AddItemToArray(v_array[measurand_index], cJSON_CreateString(num_str));
+
+                        vt_array = cJSON_GetObjectItem(cJSON_GetArrayItem(snon_array[measurand_index], 0), "vT");
+                        cJSON_AddItemToArray(vt_array, cJSON_CreateString(timestamp));
+
+                        measurand_index = measurand_index + 1U;
+                    }
 
                     clock_gettime(CLOCK_MONOTONIC, &poll_end);
 
@@ -451,48 +520,61 @@ Other changes to system state include:
             }
         }
 
-        // Write out all accumulated readings as a single value file, provided at
-        // least one reading was captured. The file is written even when a later
-        // poll error set return_status, so partial session data is preserved.
+        // Write out all accumulated readings as one value file per measurand,
+        // provided at least one reading was captured. Files are written even
+        // when a later poll error set return_status, so partial session data
+        // is preserved; a write failure for one measurand does not prevent
+        // the remaining measurands from being written.
         if(false == first_poll)
         {
-            // Value filename: ISO 8601 start timestamp with ':' replaced by '-',
-            // written under the series values directory (Section 8.6).
-            snprintf(snon_dpath, sizeof(snon_dpath), "%sseries/%s/values/%s.json",
-                     snon_path, series_uuid, first_timestamp);
-            string_replace_char(snon_dpath, ':', '-');
-
-            snon_output = cJSON_PrintUnformatted(snon_array);
-            ASSERT(NULL != snon_output, "Memory allocation failed serialising SNON array for series %s", series_uuid);
-
-            snon_fd = int32_from_int(open(snon_dpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
-
-            if(C_FAILURE == snon_fd)
+            measurand_index = 0U;
+            while(measurand_index < C_MEASURAND_COUNT)
             {
-                fprintf(stderr, "Error creating SNON value record file: %s\n", snon_dpath);
-                perror("open");
-                return_status = C_FAILURE;
-            }
-            else
-            {
-                data_len = strlen(snon_output);
-                data_written_len = write(snon_fd, snon_output, data_len);
+                // Value filename: ISO 8601 start timestamp with ':' replaced by '-',
+                // written under this measurand's series values directory (Section 8.6).
+                snprintf(snon_dpath, sizeof(snon_dpath), "%sseries/%s/values/%s.json",
+                         snon_path, series_set->uuid[measurand_index], first_timestamp);
+                string_replace_char(snon_dpath, ':', '-');
 
-                // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with data_len; safe because data_written_len is checked for < 0 first
-                if((data_written_len < 0) || ((size_t) data_written_len != data_len))
+                snon_output = cJSON_PrintUnformatted(snon_array[measurand_index]);
+                ASSERT(NULL != snon_output, "Memory allocation failed serialising SNON array for series %s", series_set->uuid[measurand_index]);
+
+                snon_fd = int32_from_int(open(snon_dpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+
+                if(C_FAILURE == snon_fd)
                 {
-                    fprintf(stderr, "Error writing SNON value record for series %s\n", series_uuid);
-                    perror("write");
+                    fprintf(stderr, "Error creating SNON value record file: %s\n", snon_dpath);
+                    perror("open");
                     return_status = C_FAILURE;
                 }
+                else
+                {
+                    data_len = strlen(snon_output);
+                    data_written_len = write(snon_fd, snon_output, data_len);
 
-                close(snon_fd);
+                    // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with data_len; safe because data_written_len is checked for < 0 first
+                    if((data_written_len < 0) || ((size_t) data_written_len != data_len))
+                    {
+                        fprintf(stderr, "Error writing SNON value record for series %s\n", series_set->uuid[measurand_index]);
+                        perror("write");
+                        return_status = C_FAILURE;
+                    }
+
+                    close(snon_fd);
+                }
+
+                cJSON_free(snon_output);
+
+                measurand_index = measurand_index + 1U;
             }
-
-            cJSON_free(snon_output);
         }
 
-        cJSON_Delete(snon_array);
+        measurand_index = 0U;
+        while(measurand_index < C_MEASURAND_COUNT)
+        {
+            cJSON_Delete(snon_array[measurand_index]);
+            measurand_index = measurand_index + 1U;
+        }
 
         return(return_status);
     }
@@ -771,16 +853,18 @@ Other changes to system state include:
 /*
 ## gpm8310_ensure_measurand
 
-Searches `snon_path/measurands/` for an existing fragment whose `eN["*"]` matches `measurand_name`, and writes the found UUID to `measurand_uuid_out`. If no match is found, creates a new immutable measurand fragment file and writes the new UUID instead.
+Searches `snon_path/measurands/` for an existing fragment whose `eN["*"]` matches `measurand_name`, and writes the found UUID to `measurand_uuid_out`. If no match is found, creates a new immutable measurand fragment file using `measurand_unit` as its `meU` value and writes the new UUID instead.
 
 Per Section 8.10, measurand files SHALL NOT be modified once written. O_EXCL is used when creating a new file, and existing files are never updated. If the `measurands/` directory does not yet exist it is treated as an empty set and a new measurand is created.
 
 ### Interactions
 
 | Parameter          | Direction | Type        | Description                                                       |
-| ------------------ | --------- | ----------- | ----------------------------------------------------------------- |
+| ------------------ | --------- | ----------- | ------------------------------------------------------------------|
 | snon_path          | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.              |
 | measurand_name     | in        | const char* | Name to find or create a measurand for. Must not be NULL.         |
+| measurand_unit     | in        | const char* | SNON `meU` unit string used only when creating a new measurand.   |
+|                    |           |             | Must not be NULL. Ignored when an existing measurand is found.    |
 | measurand_uuid_out | out       | char*       | Receives the UUID of the found or created measurand. Buffer must  |
 |                    |           |             | be at least C_UUID_LEN bytes.                                     |
 | return value       | out       | int32_t     | C_SUCCESS on success; C_FAILURE on any I/O or allocation error.   |
@@ -791,7 +875,7 @@ Other changes to system state include:
 
 */
 
-    int32_t gpm8310_ensure_measurand(const char* snon_path, const char* measurand_name, char* measurand_uuid_out)
+    int32_t gpm8310_ensure_measurand(const char* snon_path, const char* measurand_name, const char* measurand_unit, char* measurand_uuid_out)
     {
         char            measurands_dir[PATH_MAX] = {0};
         char            candidate_path[PATH_MAX + 1024] = {0};
@@ -821,6 +905,7 @@ Other changes to system state include:
 
         REQUIRES(NULL != snon_path, "snon_path is NULL");
         REQUIRES(NULL != measurand_name, "measurand_name is NULL");
+        REQUIRES(NULL != measurand_unit, "measurand_unit is NULL");
         REQUIRES(NULL != measurand_uuid_out, "measurand_uuid_out is NULL");
 
         snprintf(measurands_dir, sizeof(measurands_dir), "%smeasurands/", snon_path);
@@ -945,6 +1030,9 @@ Other changes to system state include:
                 snprintf(working_string, sizeof(working_string), "urn:uuid:%s", new_uuid);
                 cJSON_AddItemToObjectCS(measurand_obj, "eID", cJSON_CreateString(working_string));
                 cJSON_AddItemToObjectCS(measurand_obj, "eC", cJSON_CreateString("measurand"));
+                cJSON_AddItemToObjectCS(measurand_obj, "meU", cJSON_CreateString(measurand_unit));
+                cJSON_AddItemToObjectCS(measurand_obj, "meT", cJSON_CreateString("numeric"));
+                
                 snon_addname(measurand_obj, "eN", "*", measurand_name);
                 cJSON_AddItemToArray(snon_root, measurand_obj);
 
@@ -980,7 +1068,9 @@ Other changes to system state include:
 /*
 ## gpm8310_find_sensor_uuid
 
-Scans `snon_path/sensors/` for a canonical sensor fragment whose `eR.child_of` array contains `urn:uuid:<device_uuid>`. On success, writes the sensor's bare UUID to `sensor_uuid_out`.
+Scans `snon_path/sensors/` for a canonical sensor fragment whose `eR.child_of` array contains `urn:uuid:<device_uuid>` and whose `eR.measurand` array contains `urn:uuid:<measurand_uuid>`. On success, writes the sensor's bare UUID to `sensor_uuid_out`.
+
+Matching on both the parent device and the measurand allows a single device to have one sensor per tracked measurand (Section 8.9): the GPM-8310 daemon creates a separate sensor for watt-hours, voltage, current, and wattage, all child-of the same device.
 
 Returns C_SUCCESS if a matching sensor is found, C_FAILURE if no match exists or if any I/O error occurs.
 
@@ -990,6 +1080,7 @@ Returns C_SUCCESS if a matching sensor is found, C_FAILURE if no match exists or
 | --------------- | --------- | ----------- | ------------------------------------------------------------------------ |
 | snon_path       | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.                     |
 | device_uuid     | in        | const char* | Bare UUID of the parent device to match against eR.child_of.             |
+| measurand_uuid  | in        | const char* | Bare UUID of the measurand to match against eR.measurand.                |
 | sensor_uuid_out | out       | char*       | Receives the bare UUID of the matching sensor. Buffer must be at least   |
 |                 |           |             | C_UUID_LEN bytes. Not written on failure.                                |
 | return value    | out       | int32_t     | C_SUCCESS if found; C_FAILURE if not found or on any I/O error.          |
@@ -1000,11 +1091,12 @@ Other changes to system state include:
 
 */
 
-    int32_t gpm8310_find_sensor_uuid(const char* snon_path, const char* device_uuid, char* sensor_uuid_out)
+    int32_t gpm8310_find_sensor_uuid(const char* snon_path, const char* device_uuid, const char* measurand_uuid, char* sensor_uuid_out)
     {
         char            sensors_dir[PATH_MAX] = {0};
         char            candidate_path[PATH_MAX + 1024] = {0};
         char            device_urn[C_SNON_EID_LEN] = {0};
+        char            measurand_urn[C_SNON_EID_LEN] = {0};
         DIR*            dir_handle = NULL;
         struct dirent*  dir_entry = NULL;
         struct stat     stat_buf;
@@ -1017,6 +1109,8 @@ Other changes to system state include:
         cJSON*          er_item = NULL;
         cJSON*          child_of_array = NULL;
         cJSON*          child_of_entry = NULL;
+        cJSON*          measurand_array = NULL;
+        cJSON*          measurand_entry = NULL;
         size_t          entry_len = 0U;
         bool            found = false;
         bool            scan_done = false;
@@ -1024,10 +1118,12 @@ Other changes to system state include:
 
         REQUIRES(NULL != snon_path, "snon_path is NULL");
         REQUIRES(NULL != device_uuid, "device_uuid is NULL");
+        REQUIRES(NULL != measurand_uuid, "measurand_uuid is NULL");
         REQUIRES(NULL != sensor_uuid_out, "sensor_uuid_out is NULL");
 
         snprintf(sensors_dir, sizeof(sensors_dir), "%ssensors/", snon_path);
         snprintf(device_urn, sizeof(device_urn), "urn:uuid:%s", device_uuid);
+        snprintf(measurand_urn, sizeof(measurand_urn), "urn:uuid:%s", measurand_uuid);
 
         dir_handle = opendir(sensors_dir);
         if(NULL == dir_handle)
@@ -1086,13 +1182,21 @@ Other changes to system state include:
                                                         child_of_entry = cJSON_GetArrayItem(child_of_array, 0);
                                                         if((NULL != child_of_entry) && cJSON_IsString(child_of_entry) && (0 == strcmp(child_of_entry->valuestring, device_urn)))
                                                         {
-                                                            eid_item = cJSON_GetObjectItem(fragment, "eID");
-                                                            if((NULL != eid_item) && cJSON_IsString(eid_item) && (0 == strncmp(eid_item->valuestring, "urn:uuid:", C_URN_UUID_PREFIX_LEN)))
+                                                            measurand_array = cJSON_GetObjectItem(er_item, "measurand");
+                                                            if(NULL != measurand_array)
                                                             {
-                                                                strncpy(sensor_uuid_out, eid_item->valuestring + C_URN_UUID_PREFIX_LEN, C_UUID_LEN - 1U);
-                                                                sensor_uuid_out[C_UUID_LEN - 1U] = '\0';
-                                                                found = true;
-                                                                scan_done = true;
+                                                                measurand_entry = cJSON_GetArrayItem(measurand_array, 0);
+                                                                if((NULL != measurand_entry) && cJSON_IsString(measurand_entry) && (0 == strcmp(measurand_entry->valuestring, measurand_urn)))
+                                                                {
+                                                                    eid_item = cJSON_GetObjectItem(fragment, "eID");
+                                                                    if((NULL != eid_item) && cJSON_IsString(eid_item) && (0 == strncmp(eid_item->valuestring, "urn:uuid:", C_URN_UUID_PREFIX_LEN)))
+                                                                    {
+                                                                        strncpy(sensor_uuid_out, eid_item->valuestring + C_URN_UUID_PREFIX_LEN, C_UUID_LEN - 1U);
+                                                                        sensor_uuid_out[C_UUID_LEN - 1U] = '\0';
+                                                                        found = true;
+                                                                        scan_done = true;
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1126,60 +1230,47 @@ Other changes to system state include:
 /*
 ## gpm8310_create_snon_definitions
 
-Creates SNON 4.0 filesystem artefacts for the GPM-8310 device and its single watt-hour sensor, then creates a new series entity for this collection session. Returns the new series UUID via `series_uuid_out` for use by `gpm8310_collect_values`.
+Creates SNON 4.0 filesystem artefacts for the GPM-8310 device, then resolves the measurand/sensor/series chain for each of the four tracked quantities (cumulative watt-hours, voltage, current, and wattage) via `gpm8310_create_measurand_chain`. Returns the four new series UUIDs via `series_set_out` for use by `gpm8310_collect_values`.
 
 The following artefacts are produced under `snon_path`:
 
 1. `devices/<device_uuid>.json` — device fragment. Skipped without error if already exists (Section 8.11).
 2. `devices/<device_uuid>/`, `devices/<device_uuid>/devices/`, `devices/<device_uuid>/sensors/` — device subdirectories (idempotent).
-3. `measurands/<measurand_uuid>.json` — "Cumulative Watt-Hours" measurand fragment, if none exists (Section 8.10).
-4. `sensors/<sensor_uuid>.json` — sensor fragment with `eR.child_of = device_uuid` and `eR.measurand`. Created only if no sensor with `child_of = device_uuid` already exists.
-5. `sensors/<sensor_uuid>/`, `sensors/<sensor_uuid>/values/`, `sensors/<sensor_uuid>/series/` — sensor subdirectories (idempotent).
-6. Symlink pair in `devices/<device_uuid>/sensors/` pointing to the sensor (idempotent, Section 8.7.1).
-7. `series/<series_uuid>.json` — series fragment with `eR.child_of = sensor_uuid` and `eR.measurand`. A new series is always created (one per session).
-8. `series/<series_uuid>/`, `series/<series_uuid>/values/` — series subdirectories.
-9. Symlink pair in `sensors/<sensor_uuid>/series/` pointing to the new series (Section 8.7.1).
+3. For each of the C_MEASURAND_COUNT tracked quantities, the measurand/sensor/series chain described in `gpm8310_create_measurand_chain`.
 
 ### Interactions
 
-| Parameter       | Direction | Type        | Description                                                              |
-| --------------- | --------- | ----------- | ------------------------------------------------------------------------ |
-| snon_path       | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.                     |
-| device_uuid     | in        | const char* | UUID string identifying the device. Must not be NULL.                    |
-| series_uuid_out | out       | char*       | Receives the newly created series UUID. Buffer must be C_UUID_LEN bytes. |
-| return value    | out       | int32_t     | C_SUCCESS on success; C_FAILURE on any I/O or allocation error.          |
+| Parameter       | Direction | Type                   | Description                                                              |
+| --------------- | --------- | ---------------------- | ------------------------------------------------------------------------ |
+| snon_path       | in        | const char*            | SNON root path. Must not be NULL. Must end with '/'.                     |
+| device_uuid     | in        | const char*            | UUID string identifying the device. Must not be NULL.                    |
+| series_set_out  | out       | gpm8310_series_set_t*  | Receives the newly created series UUID for each tracked measurand.       |
+| return value    | out       | int32_t                | C_SUCCESS on success; C_FAILURE on any I/O or allocation error.          |
 
 Other changes to system state include:
 
-- Creates directories and files in the SNON directory tree as listed above.
+- Creates directories and files in the SNON directory tree as listed above, repeated once per tracked measurand (Section 8 helpers).
 
 */
 
-    int32_t gpm8310_create_snon_definitions(const char* snon_path, const char* device_uuid, char* series_uuid_out)
+    int32_t gpm8310_create_snon_definitions(const char* snon_path, const char* device_uuid, gpm8310_series_set_t* series_set_out)
     {
         char        snon_fpath[PATH_MAX] = {0};
         char        snon_dpath[PATH_MAX] = {0};
-        char        link_dir[PATH_MAX] = {0};
-        char        rel_file_target[PATH_MAX] = {0};
-        char        rel_dir_target[PATH_MAX] = {0};
         int32_t     snon_fd = C_FAILURE;
         cJSON*      snon_root = NULL;
         cJSON*      entity_obj = NULL;
-        cJSON*      relation_object = NULL;
-        cJSON*      relation_array = NULL;
-        char        sensor_uuid[C_UUID_LEN] = {0};
-        char        series_uuid[C_UUID_LEN] = {0};
-        char        measurand_uuid[C_UUID_LEN] = {0};
         char        working_string[1024] = {0};
         char*       snon_output = NULL;
         size_t      output_len = 0U;
         ssize_t     bytes_written = 0;
+        uint32_t    measurand_index = 0U;
         int32_t     return_status = C_SUCCESS;
 
         REQUIRES(NULL != snon_path, "snon_path is NULL");
         REQUIRES(NULL != device_uuid, "device_uuid is NULL");
         REQUIRES(is_valid_uuid(device_uuid), "device_uuid is not a valid UUID");
-        REQUIRES(NULL != series_uuid_out, "series_uuid_out is NULL");
+        REQUIRES(NULL != series_set_out, "series_set_out is NULL");
 
         // ---------------------------------------------------------------
         // Device canonical fragment file (Section 8.5).
@@ -1256,24 +1347,90 @@ Other changes to system state include:
         }
 
         // ---------------------------------------------------------------
-        // Resolve the shared measurand for both the sensor and the series.
-        if(C_SUCCESS == return_status)
+        // Resolve the measurand/sensor/series chain for each tracked quantity.
+        // Stops at the first failure; series_set_out entries past the failure
+        // point are left unset.
+        measurand_index = 0U;
+        while((C_SUCCESS == return_status) && (measurand_index < C_MEASURAND_COUNT))
         {
-            return_status = gpm8310_ensure_measurand(snon_path, "Cumulative Watt-Hours", measurand_uuid);
+            return_status = gpm8310_create_measurand_chain(snon_path, device_uuid,
+                                                             g_measurand_defs[measurand_index].name,
+                                                             g_measurand_defs[measurand_index].unit,
+                                                             series_set_out->uuid[measurand_index]);
+            measurand_index = measurand_index + 1U;
         }
 
+        return(return_status);
+    }
+
+/*
+## gpm8310_create_measurand_chain
+
+Ensures the measurand, sensor, and series entities for a single GPM-8310 measurement quantity exist under `snon_path`, creating a new series for this session. Used by `gpm8310_create_snon_definitions` once per tracked measurand (Section 8.9).
+
+The measurand identified by `measurand_name` is found or created via `gpm8310_ensure_measurand` (Section 8.10, immutable). The sensor for this device/measurand pair is found via `gpm8310_find_sensor_uuid`, which matches on both `eR.child_of = device_uuid` and `eR.measurand`; if none exists, a new sensor is created, named `measurand_name`. A new series is always created for this session, child-of the resolved sensor, referencing the resolved measurand, and named `measurand_name`. Symlink pairs are created in `devices/<device_uuid>/sensors/` and `sensors/<sensor_uuid>/series/` per Section 8.7.1.
+
+### Interactions
+
+| Parameter        | Direction | Type        | Description                                                              |
+| ----------------- | --------- | ----------- | ------------------------------------------------------------------------ |
+| snon_path         | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.                     |
+| device_uuid       | in        | const char* | UUID string identifying the parent device. Must not be NULL.             |
+| measurand_name    | in        | const char* | Human-readable name shared by the measurand, sensor, and series.         |
+| measurand_unit    | in        | const char* | SNON `meU` unit string for the measurand (e.g. "V", "A", "W", "Wh").     |
+| series_uuid_out   | out       | char*       | Receives the newly created series UUID. Buffer must be C_UUID_LEN bytes. |
+| return value      | out       | int32_t     | C_SUCCESS on success; C_FAILURE on any I/O or allocation error.          |
+
+Other changes to system state include:
+
+- Creates `measurands/<uuid>.json` if no matching measurand exists (Section 8.10).
+- Creates `sensors/<uuid>.json` and its subdirectories if no matching sensor exists for this device/measurand pair.
+- Creates a new `series/<uuid>.json` and `series/<uuid>/values/` for this session.
+- Creates relative symlink pairs linking the device to the sensor and the sensor to the series (Section 8.7).
+
+*/
+
+    int32_t gpm8310_create_measurand_chain(const char* snon_path, const char* device_uuid, const char* measurand_name, const char* measurand_unit, char* series_uuid_out)
+    {
+        char        snon_fpath[PATH_MAX] = {0};
+        char        snon_dpath[PATH_MAX] = {0};
+        char        link_dir[PATH_MAX] = {0};
+        char        rel_file_target[PATH_MAX] = {0};
+        char        rel_dir_target[PATH_MAX] = {0};
+        int32_t     snon_fd = C_FAILURE;
+        cJSON*      snon_root = NULL;
+        cJSON*      entity_obj = NULL;
+        cJSON*      relation_object = NULL;
+        cJSON*      relation_array = NULL;
+        char        sensor_uuid[C_UUID_LEN] = {0};
+        char        series_uuid[C_UUID_LEN] = {0};
+        char        measurand_uuid[C_UUID_LEN] = {0};
+        char        working_string[1024] = {0};
+        char*       snon_output = NULL;
+        size_t      output_len = 0U;
+        ssize_t     bytes_written = 0;
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != snon_path, "snon_path is NULL");
+        REQUIRES(NULL != device_uuid, "device_uuid is NULL");
+        REQUIRES(NULL != measurand_name, "measurand_name is NULL");
+        REQUIRES(NULL != measurand_unit, "measurand_unit is NULL");
+        REQUIRES(NULL != series_uuid_out, "series_uuid_out is NULL");
+
         // ---------------------------------------------------------------
-        // Sensor: find the existing sensor for this device, or create one.
-        // The GPM-8310 has exactly one watt-hour output, so there is at
-        // most one sensor per device UUID.
+        // Resolve the shared measurand for both the sensor and the series.
+        return_status = gpm8310_ensure_measurand(snon_path, measurand_name, measurand_unit, measurand_uuid);
+
+        // ---------------------------------------------------------------
+        // Sensor: find the existing sensor for this device/measurand pair, or create one.
         if(C_SUCCESS == return_status)
         {
-            if(C_FAILURE == gpm8310_find_sensor_uuid(snon_path, device_uuid, sensor_uuid))
+            if(C_FAILURE == gpm8310_find_sensor_uuid(snon_path, device_uuid, measurand_uuid, sensor_uuid))
             {
-                // No sensor exists yet for this device; create one now.
+                // No sensor exists yet for this device/measurand pair; create one now.
                 if(C_FAILURE == generate_random_uuid(sensor_uuid))
                 {
-                    fprintf(stderr, "Error generating random UUID for sensor\n");
+                    fprintf(stderr, "Error generating random UUID for sensor '%s'\n", measurand_name);
                     return_status = C_FAILURE;
                 }
 
@@ -1300,7 +1457,7 @@ Other changes to system state include:
                     snprintf(working_string, sizeof(working_string), "urn:uuid:%s", sensor_uuid);
                     cJSON_AddItemToObjectCS(entity_obj, "eID", cJSON_CreateString(working_string));
                     cJSON_AddItemToObjectCS(entity_obj, "eC",  cJSON_CreateString("sensor"));
-                    snon_addname(entity_obj, "eN", "*", "Cumulative Watt-Hours");
+                    snon_addname(entity_obj, "eN", "*", measurand_name);
 
                     // eR: child_of device (Section 8.9) and measurand reference (Section 8.10).
                     relation_object = cJSON_CreateObject();
@@ -1382,7 +1539,7 @@ Other changes to system state include:
         {
             if(C_FAILURE == generate_random_uuid(series_uuid))
             {
-                fprintf(stderr, "Error generating random UUID for series\n");
+                fprintf(stderr, "Error generating random UUID for series '%s'\n", measurand_name);
                 return_status = C_FAILURE;
             }
         }
@@ -1410,7 +1567,7 @@ Other changes to system state include:
             snprintf(working_string, sizeof(working_string), "urn:uuid:%s", series_uuid);
             cJSON_AddItemToObjectCS(entity_obj, "eID", cJSON_CreateString(working_string));
             cJSON_AddItemToObjectCS(entity_obj, "eC",  cJSON_CreateString(C_SNON_SERIES_CLASS));
-            snon_addname(entity_obj, "eN", "*", "Cumulative Watt-Hours");
+            snon_addname(entity_obj, "eN", "*", measurand_name);
 
             // eR: child_of the parent sensor (Section 8.9) and measurand reference (Section 8.10).
             relation_object = cJSON_CreateObject();
@@ -1795,7 +1952,7 @@ int32_t gpm8310_instrument_identify(int32_t socket_fd)
 /*
 ## Configure GPM-8310 for energy accumulation
 
-`gpm8310_instrument_configure` sends the sequence of SCPI commands that prepare the GPM-8310 for watt-hour accumulation. Each command is sent only if all preceding commands succeeded, so the first failure stops the sequence immediately.
+`gpm8310_instrument_configure` sends the sequence of SCPI commands that prepare the GPM-8310 for watt-hour accumulation and binds the numeric read slots used to poll voltage, current, and wattage alongside the accumulated energy. Each command is sent only if all preceding commands succeeded, so the first failure stops the sequence immediately.
 
 The commands issued are:
 
@@ -1804,10 +1961,14 @@ The commands issued are:
 3. `:INTEGrate:FUNCtion WATThour` - select watt-hour as the integrated quantity.
 4. `:INTEGrate:MODE MANual` - set the integrator to run until `:INTEGrate:STOP` is issued, rather than for a fixed time.
 5. `:INTEGrate:RESet` - zero any previously accumulated energy.
-6. `:NUMeric:NORMal:ITEM1 WH` - bind numeric read-slot 1 to total Wh. Additional slots can be mapped to `WHP` (positive Wh only), `WHM` (negative Wh only), or `AH` (total ampere-hours) as needed.
-7. `:INTEGrate:STARt` - begin accumulation.
+6. `:NUMeric:NORMal:ITEM1 WH` - bind numeric read-slot 1 to total Wh.
+7. `:NUMeric:NORMal:ITEM2 U` - bind numeric read-slot 2 to instantaneous voltage (GPM-8310's `U` function mnemonic).
+8. `:NUMeric:NORMal:ITEM3 I` - bind numeric read-slot 3 to instantaneous current.
+9. `:NUMeric:NORMal:ITEM4 P` - bind numeric read-slot 4 to instantaneous active power (wattage).
+10. `:NUMeric:NORMal:NUMber 4` - limit the number of values a parameterless `:NUMeric:VALue?` query returns to exactly the four slots bound above.
+11. `:INTEGrate:STARt` - begin accumulation.
 
-After a successful return the instrument integrator is running.
+After a successful return the instrument integrator is running and a single `:NUMeric:VALue?` query (Section "GPM-8310 User Manual Rev. C, Command List, `:NUMeric[:NORMal]:VALue`") returns all four readings, comma-separated, in slot order.
 
 ### Interactions
 
@@ -1818,8 +1979,8 @@ After a successful return the instrument integrator is running.
 
 Other changes to system state include:
 
-- Sends seven SCPI configuration commands to the instrument.
-- After a successful return, the instrument integrator is running and energy is being accumulated into slot 1 (total Wh).
+- Sends eleven SCPI configuration commands to the instrument.
+- After a successful return, the instrument integrator is running and energy is being accumulated into slot 1 (total Wh); slots 2-4 report instantaneous voltage, current, and wattage.
 
 */
 int32_t gpm8310_instrument_configure(int32_t socket_fd)
@@ -1860,6 +2021,34 @@ int32_t gpm8310_instrument_configure(int32_t socket_fd)
     if(C_SUCCESS == status)
     {
         status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM1 WH\r\n");
+    }
+
+    // :NUMeric:NORMal:ITEM2 U - bind read-slot 2 to instantaneous voltage.
+    // "U" is the GPM-8310's function mnemonic for voltage (Command List,
+    // ":NUMeric[:NORMal]:ITEM<x>"), distinct from the "V" physical unit
+    // stored in the corresponding measurand's "meU" field.
+    if(C_SUCCESS == status)
+    {
+        status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM2 U\r\n");
+    }
+
+    // :NUMeric:NORMal:ITEM3 I - bind read-slot 3 to instantaneous current.
+    if(C_SUCCESS == status)
+    {
+        status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM3 I\r\n");
+    }
+
+    // :NUMeric:NORMal:ITEM4 P - bind read-slot 4 to instantaneous active power (wattage).
+    if(C_SUCCESS == status)
+    {
+        status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM4 P\r\n");
+    }
+
+    // :NUMeric:NORMal:NUMber 4 - a parameterless :NUMeric:VALue? query returns
+    // exactly the four slots bound above, comma-separated, in slot order.
+    if(C_SUCCESS == status)
+    {
+        status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:NUMber 4\r\n");
     }
 
     // :INTEGrate:STARt - begin accumulation.
@@ -1937,40 +2126,51 @@ int32_t gpm8310_connect(const char* dest_host_name, const char* dest_port_num)
 }
 
 /*
-## Reading accumulated watt-hours
+## Reading GPM-8310 measurements
 
-`gpm8310_read_wh` queries `:NUMeric:VALue?`, which returns the value bound to numeric slot 1 - configured by `gpm8310_connect` as total accumulated watt-hours. The response is a number in scientific notation, for example `+1.23450E+00`, which is parsed with `strtod`.
+`gpm8310_read_measurements` queries `:NUMeric:VALue?`, which returns the four values bound to numeric slots 1-4 by `gpm8310_instrument_configure`: total accumulated watt-hours, instantaneous voltage, instantaneous current, and instantaneous wattage, in that slot order. The response is a single comma-separated line of numbers in scientific notation, for example `+1.23450E+00,+1.20000E+02,+5.00000E-01,+6.00000E+01`, parsed in order with `strtod`. Reading all four quantities with one query keeps each polling iteration well within the `C_POLL_INTERVAL_NS` cadence.
 
-The use of floating point is unavoidable here: the GPM-8310 reports energy values in scientific notation and `strtod` returns `double`. See the annotation below for the corresponding rule deviation.
+The use of floating point is unavoidable here: the GPM-8310 reports measurements in scientific notation and `strtod` returns `double`. See the annotation below for the corresponding rule deviation.
 
-`errno` is explicitly cleared to zero immediately before calling `strtod` so that the subsequent `ERANGE` check is not confused by an earlier error from a different system call.
+`errno` is explicitly cleared to zero immediately before each `strtod` call so that the subsequent `ERANGE` check is not confused by an earlier error from a different system call.
 
 ### Interactions
 
-| Parameter     | Direction | Type    | Description                                               |
-| ------------- | --------- | ------- | --------------------------------------------------------- |
-| socket_fd     | in        | int32_t | Socket file descriptor returned by `gpm8310_connect`.     |
-| wh_out        | out       | double* | Receives the accumulated watt-hours on success. Not written on failure. |
-| return value  | out       | int32_t | C_SUCCESS on success, C_FAILURES on failure.              |
+| Parameter     | Direction | Type    | Description                                                              |
+| ------------- | --------- | ------- | ------------------------------------------------------------------------- |
+| socket_fd     | in        | int32_t | Socket file descriptor returned by `gpm8310_connect`.                     |
+| wh_out        | out       | double* | Receives the accumulated watt-hours (slot 1) on success. Not written on failure. |
+| voltage_out   | out       | double* | Receives the instantaneous voltage (slot 2) on success. Not written on failure.  |
+| current_out   | out       | double* | Receives the instantaneous current (slot 3) on success. Not written on failure.  |
+| wattage_out   | out       | double* | Receives the instantaneous wattage (slot 4) on success. Not written on failure.  |
+| return value  | out       | int32_t | C_SUCCESS on success, C_FAILURE on failure.                               |
 
 Other changes to system state include:
 
 - Sends `:NUMeric:VALue?` to the instrument and reads one line of response.
-- Sets `errno` to 0 before calling `strtod`.
+- Sets `errno` to 0 before each `strtod` call.
 
 */
-int32_t gpm8310_read_wh(int32_t socket_fd, double* wh_out)
+int32_t gpm8310_read_measurements(int32_t socket_fd, double* wh_out, double* voltage_out, double* current_out, double* wattage_out)
 {
-    char    resp[C_RESP_BUF_LEN] = {0};
-    char*   parse_end = NULL;
-    double  val = 0.0;
-    int32_t status = C_SUCCESS;
+    char       resp[C_RESP_BUF_LEN] = {0};
+    char*      parse_pos = NULL;
+    char*      parse_end = NULL;
+    double     values[C_MEASURAND_COUNT] = {0};
+    uint32_t   value_index = 0U;
+    int32_t    status = C_SUCCESS;
 
-    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_read_wh");
-    REQUIRES(NULL != wh_out, "NULL wh_out pointer passed to gpm8310_read_wh");
+    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_read_measurements");
+    REQUIRES(NULL != wh_out, "NULL wh_out pointer passed to gpm8310_read_measurements");
+    REQUIRES(NULL != voltage_out, "NULL voltage_out pointer passed to gpm8310_read_measurements");
+    REQUIRES(NULL != current_out, "NULL current_out pointer passed to gpm8310_read_measurements");
+    REQUIRES(NULL != wattage_out, "NULL wattage_out pointer passed to gpm8310_read_measurements");
 
     // :NUMeric:VALue? returns one value per configured ITEM slot, comma-separated.
-    // With only ITEM1 mapped the response is a single number, e.g. "+1.23450E+00".
+    // gpm8310_instrument_configure binds exactly C_MEASURAND_COUNT slots (WH, U,
+    // I, P) and sets :NUMeric:NORMal:NUMber to match, so a single parameterless
+    // query returns all four readings in slot order, e.g.
+    // "+1.23450E+00,+1.20000E+02,+5.00000E-01,+6.00000E+01".
     status = scpi_send_cmd(socket_fd, ":NUMeric:VALue?\r\n");
     if(C_SUCCESS == status)
     {
@@ -1979,33 +2179,54 @@ int32_t gpm8310_read_wh(int32_t socket_fd, double* wh_out)
 
     if(C_SUCCESS != status)
     {
-        fprintf(stderr, "gpm8310_read_wh: communication failed: %s\n", strerror(errno));
+        fprintf(stderr, "gpm8310_read_measurements: communication failed: %s\n", strerror(errno));
     }
     else
     {
-        // Clear errno before strtod so that ERANGE detection is reliable.
-        errno = 0;
+        parse_pos = resp;
+        value_index = 0U;
 
-        // ASDFG-C 6.23 VIOLATION: Floating point is unavoidable here. The GPM-8310
-        // reports energy values in scientific notation and strtod returns double.
-        val = strtod(resp, &parse_end);
+        while((C_SUCCESS == status) && (value_index < C_MEASURAND_COUNT))
+        {
+            // Clear errno before strtod so that ERANGE detection is reliable.
+            errno = 0;
 
-        if(parse_end == resp)
-        {
-            // strtod consumed zero characters: the response is not a number.
-            fprintf(stderr, "gpm8310_read_wh: non-numeric response: \"%s\"\n", resp);
-            status = C_FAILURE;
+            // ASDFG-C 6.23 VIOLATION: Floating point is unavoidable here. The GPM-8310
+            // reports measurements in scientific notation and strtod returns double.
+            values[value_index] = strtod(parse_pos, &parse_end);
+
+            if(parse_end == parse_pos)
+            {
+                // strtod consumed zero characters: the response is not a number.
+                fprintf(stderr, "gpm8310_read_measurements: non-numeric response: \"%s\"\n", resp);
+                status = C_FAILURE;
+            }
+            else if(ERANGE == errno)
+            {
+                // strtod set ERANGE: the parsed value overflowed or underflowed double.
+                fprintf(stderr, "gpm8310_read_measurements: value out of range: \"%s\"\n", resp);
+                status = C_FAILURE;
+            }
+            else
+            {
+                // Advance past the separating comma, if present, before parsing the next value.
+                parse_pos = parse_end;
+                if(',' == *parse_pos)
+                {
+                    parse_pos = parse_pos + 1;
+                }
+
+                value_index = value_index + 1U;
+            }
         }
-        else if(ERANGE == errno)
-        {
-            // strtod set ERANGE: the parsed value overflowed or underflowed double.
-            fprintf(stderr, "gpm8310_read_wh: value out of range: \"%s\"\n", resp);
-            status = C_FAILURE;
-        }
-        else
-        {
-            *wh_out = val;
-        }
+    }
+
+    if(C_SUCCESS == status)
+    {
+        *wh_out      = values[C_MEASURAND_WH];
+        *voltage_out = values[C_MEASURAND_VOLTAGE];
+        *current_out = values[C_MEASURAND_CURRENT];
+        *wattage_out = values[C_MEASURAND_WATTAGE];
     }
 
     return(status);
