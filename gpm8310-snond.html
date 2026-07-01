@@ -4,7 +4,7 @@
 
 Polls and writes sensor data from a GW Instek GPM-8310 power meter.
 
-Sensor data is written in <a href="https://www.snon.org/">SNON 4</a> format. The daemon opens a TCP/IP connection to the power meter, configures power integration, creates initial SNON device, sensor, series, and measurand records on first run, then enters a continuous polling loop until SIGINT. Each poll reads four quantities from the instrument in a single SCPI query: cumulative watt-hours, voltage, current, and wattage. Each quantity has its own measurand, sensor, and series; all readings are accumulated in memory and written as four separate SNON value fragments at the end of the session.
+Sensor data is written in <a href="https://www.snon.org/">SNON 4</a> format. The daemon opens a TCP/IP connection to the power meter, configures power integration, creates initial SNON device, sensor, series, and measurand records on first run, then enters a continuous polling loop until SIGINT. Each poll reads four quantities from the instrument in a single SCPI query: cumulative energy, voltage, current, and wattage. Each quantity has its own measurand, sensor, and series; all readings are accumulated in memory and written as four separate SNON value fragments at the end of the session.
 
 Known issues:
 
@@ -15,9 +15,9 @@ Known issues:
 */
 
     // ---------------------------------------------------------------------------------
-    // GPM-8310 Power Meter Sensor Daemon - Main routines
+    // GPM-8310 Power Analyzer Sensor Daemon - Main routines
     // ---------------------------------------------------------------------------------
-    // Polls and writes out sensor data from a GW Instek GPM-8310 power meter.
+    // Polls and writes out sensor data from a GW Instek GPM-8310 analyzer meter.
     // Sensor data is written in SNON 4 format.
     // ---------------------------------------------------------------------------------
     // SPDX-FileCopyrightText: Copyright 2026 David Slik
@@ -71,6 +71,15 @@ Constants for connecting to the device and for device control using the SCPI pro
     #define C_POLL_INTERVAL_NS          23000000L       // 23 ms in nanoseconds
     #define C_NS_PER_SECOND             1000000000      // 1 s in nanoseconds
 
+    // Watt-hour counter reset threshold.
+    // The GPM-8310 provides five significant digits. At 9 Wh the counter spans
+    // 0.00–9.000 Wh, keeping the LSB at 0.001 Wh throughout the session.
+    // When the raw counter reading from the previous poll meets or exceeds this
+    // value, the next poll uses the compound read/RESET/START command to
+    // snapshot the counter and zero it, adding the snapshot to the software
+    // accumulator. This holds resolution at 0.001 Wh regardless of session length.
+    #define C_WH_RESET_THRESHOLD        9.0             // Wh; trigger a counter reset on the next poll
+
     // Tracked measurands
     // The GPM-8310 :NUMeric:NORMal:ITEM<x> command uses U/I/P/WH as its
     // function mnemonics for voltage, current, active power, and total
@@ -78,7 +87,7 @@ Constants for connecting to the device and for device control using the SCPI pro
     // Section ":NUMeric[:NORMal]:ITEM<x>"). These are distinct from the
     // physical units (V, A, W, Wh) stored in each measurand's "meU" field.
     #define C_MEASURAND_COUNT           4U              // Number of quantities polled and tracked per session
-    #define C_MEASURAND_WH              0U              // Index of the cumulative watt-hours measurand
+    #define C_MEASURAND_WH              0U              // Index of the cumulative energy measurand
     #define C_MEASURAND_VOLTAGE         1U              // Index of the voltage measurand
     #define C_MEASURAND_CURRENT         2U              // Index of the current measurand
     #define C_MEASURAND_WATTAGE         3U              // Index of the wattage (active power) measurand
@@ -157,7 +166,7 @@ Local functions
     int32_t gpm8310_connect(const char* dest_host_name, const char* dest_port_num);
     int32_t gpm8310_instrument_identify(int32_t socket_fd);
     int32_t gpm8310_instrument_configure(int32_t socket_fd);
-    int32_t gpm8310_read_measurements(int32_t socket_fd, double* wh_out, double* voltage_out, double* current_out, double* wattage_out);
+    int32_t gpm8310_read_measurements(int32_t socket_fd, bool do_reset, double* wh_out, double* voltage_out, double* current_out, double* wattage_out);
     int32_t gpm8310_disconnect(int32_t socket_fd);
 
     // ASDFG-C 6.18 VIOLATION: POSIX sigaction handler signature requires int signum; no fixed-width alternative
@@ -189,10 +198,10 @@ Global variables
     // measurand, sensor, and series entities; unit is the SNON "meU" value.
     static const gpm8310_measurand_def_t g_measurand_defs[C_MEASURAND_COUNT] =
     {
-        { "Cumulative Watt-Hours", "Wh" },
-        { "Voltage",               "V"  },
-        { "Current",               "A"  },
-        { "Wattage",               "W"  }
+        { "Cumulative Energy", "Wh" },
+        { "Voltage",           "V"  },
+        { "Current",           "A"  },
+        { "Wattage",           "W"  }
     };
 
 /*
@@ -213,7 +222,7 @@ The daemon runs until it receives a SIGINT signal, at which point the signal han
 Other changes to system state include:
 
 - Creates `devices/<uuid>.json` on first run; skipped without error on subsequent runs.
-- Creates `measurands/<uuid>.json` for each of "Cumulative Watt-Hours", "Voltage", "Current", and "Wattage" on first run; skipped if a measurand already exists.
+- Creates `measurands/<uuid>.json` for each of "Cumulative Energy", "Voltage", "Current", and "Wattage" on first run; skipped if a measurand already exists.
 - Creates `sensors/<uuid>.json` for each of the four measurands on first run, one per device/measurand pair; skipped without error on subsequent runs.
 - Creates a new `series/<uuid>.json` and `series/<uuid>/values/` for each of the four measurands on every run (one series per measurand per session).
 - Creates relative symlink pairs linking the device to each sensor and each sensor to its series (Section 8.7).
@@ -354,6 +363,12 @@ Accumulates watt-hour, voltage, current, and wattage readings from the GPM-8310 
 
 Each polling iteration sends a single `:NUMeric:VALue?` query (via `gpm8310_read_measurements`) that returns all four readings together, so the four per-measurand `v`/`vT` arrays always share the same timestamp at a given poll index.
 
+**Watt-hour accumulation and counter reset**: The GPM-8310 provides five significant digits. To maintain 0.001 Wh resolution throughout an arbitrarily long session, this function tracks a software `wh_accumulator` (double) and periodically resets the instrument counter:
+
+- On each poll, if the raw counter reading from the *previous* poll was >= `C_WH_RESET_THRESHOLD`, the current poll uses the compound SCPI command `:NUMeric:VALue?;:INTEGrate:RESet;:INTEGrate:STARt`, which reads the counter snapshot and zeroes it in a single send/recv round trip. The snapshot is added to `wh_accumulator` before the counter restarts from zero.
+- On all other polls, a plain `:NUMeric:VALue?` is used.
+- The value stored in the SNON `v` array for the WH measurand is always `wh_accumulator + raw_counter`, giving a continuous monotonically increasing total across resets.
+
 Installs a SIGINT handler that sets `g_abort_collect`, causing the polling loop to exit cleanly. On exit the handler is unregistered. Each fragment is written to `series/<series_set->uuid[i]>/values/<start_timestamp>.json`, where `<start_timestamp>` is the ISO 8601 UTC timestamp of the first poll with colons replaced by hyphens (Section 8.6), shared by all four files. Files are written even if a read error interrupted the session, provided at least one reading was captured before the error; writes for one measurand are attempted independently of the outcome for another.
 
 ### Interactions
@@ -371,6 +386,7 @@ Other changes to system state include:
 - Installs and restores the SIGINT handler via sigaction with SA_RESTART.
 - Creates up to C_MEASURAND_COUNT JSON files, one at `series/<uuid>/values/<timestamp>.json` per measurand.
 - Calls nanosleep between successful poll iterations to maintain the C_POLL_INTERVAL_NS cadence.
+- Periodically sends the compound read/RESET/START command to the instrument when `prev_wh` >= `C_WH_RESET_THRESHOLD`.
 
 */
 
@@ -383,6 +399,9 @@ Other changes to system state include:
         struct timespec     poll_end = {0};
         struct timespec     sleep_duration = {0};
         double              readings[C_MEASURAND_COUNT] = {0};
+        double              wh_accumulator = 0.0;       // software total Wh across all counter resets this session
+        double              prev_wh = 0.0;              // raw counter reading from the previous poll
+        bool                do_reset = false;           // true when the next poll should use the compound reset command
         char                timestamp[C_ISO8601_LEN] = {0};
         char                first_timestamp[C_ISO8601_LEN] = {0};
         int64_t             poll_start_nsec = 0;
@@ -468,17 +487,44 @@ Other changes to system state include:
                     first_poll = false;
                 }
 
+                // Decide whether this poll should snapshot-and-reset the counter.
+                // The decision is based on the raw counter reading from the previous
+                // poll so that the reset itself is always a single send/recv operation.
+                do_reset = (prev_wh >= C_WH_RESET_THRESHOLD);
+
                 // Single combined query: all four readings come back from one
-                // :NUMeric:VALue? round trip, keeping each poll iteration well
-                // within the C_POLL_INTERVAL_NS cadence.
-                if(C_FAILURE == gpm8310_read_measurements(dev_fd, &readings[C_MEASURAND_WH], &readings[C_MEASURAND_VOLTAGE], &readings[C_MEASURAND_CURRENT], &readings[C_MEASURAND_WATTAGE]))
+                // round trip, keeping each poll iteration well within the
+                // C_POLL_INTERVAL_NS cadence. On reset polls the compound command
+                // atomically snapshots and zeroes the counter in the same round trip.
+                if(C_FAILURE == gpm8310_read_measurements(dev_fd, do_reset, &readings[C_MEASURAND_WH], &readings[C_MEASURAND_VOLTAGE], &readings[C_MEASURAND_CURRENT], &readings[C_MEASURAND_WATTAGE]))
                 {
-                    fprintf(stderr, "gpm8310_collect_values: read failed; stopping collection\n");
-                    return_status = C_FAILURE;
+                    if(false == g_abort_collect)
+                    {
+                        fprintf(stderr, "gpm8310_collect_values: read failed; stopping collection\n");
+                        return_status = C_FAILURE;
+                    }
+
                     should_poll = false;
                 }
                 else
                 {
+                    // Watt-hour accumulation.
+                    // On a reset poll, readings[C_MEASURAND_WH] is the snapshot taken
+                    // before the counter was zeroed, so it is added to the accumulator.
+                    // The stored value for this poll is the accumulator (counter is now 0).
+                    // On a normal poll, the stored value is accumulator + raw counter.
+                    if(true == do_reset)
+                    {
+                        wh_accumulator = wh_accumulator + readings[C_MEASURAND_WH];
+                        prev_wh = 0.0;
+                        readings[C_MEASURAND_WH] = wh_accumulator;
+                    }
+                    else
+                    {
+                        prev_wh = readings[C_MEASURAND_WH];
+                        readings[C_MEASURAND_WH] = wh_accumulator + readings[C_MEASURAND_WH];
+                    }
+
                     measurand_index = 0U;
                     while(measurand_index < C_MEASURAND_COUNT)
                     {
@@ -1230,7 +1276,7 @@ Other changes to system state include:
 /*
 ## gpm8310_create_snon_definitions
 
-Creates SNON 4.0 filesystem artefacts for the GPM-8310 device, then resolves the measurand/sensor/series chain for each of the four tracked quantities (cumulative watt-hours, voltage, current, and wattage) via `gpm8310_create_measurand_chain`. Returns the four new series UUIDs via `series_set_out` for use by `gpm8310_collect_values`.
+Creates SNON 4.0 filesystem artefacts for the GPM-8310 device, then resolves the measurand/sensor/series chain for each of the four tracked quantities (cumulative energy, voltage, current, and wattage) via `gpm8310_create_measurand_chain`. Returns the four new series UUIDs via `series_set_out` for use by `gpm8310_collect_values`.
 
 The following artefacts are produced under `snon_path`:
 
@@ -1642,9 +1688,9 @@ Other changes to system state include:
     }
 
 /*
-## Send an SCPI command to the power meter
+## Send an SCPI command to the power analyzer
 
-Takes a user-provided string that contains an SCPI command and sends it over the TCP/IP connection to the power meter.
+Takes a user-provided string that contains an SCPI command and sends it over the TCP/IP connection to the power analyzer.
 
 ### Interactions
 
@@ -1659,26 +1705,27 @@ Other changes to system state include:
 - Writes to the socket identified by `socket_fd`.
 
 */
-int32_t scpi_send_cmd(int32_t socket_fd, const char* cmd)
-{
-    int32_t    status = C_SUCCESS;
-    int64_t    send_result = 0;
 
-    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to scpi_send_cmd");
-    REQUIRES(NULL != cmd, "NULL command string passed to scpi_send_cmd");
-
-    send_result = int64_from_ssize(send(socket_fd, cmd, strlen(cmd), MSG_NOSIGNAL));
-
-    if(0 > send_result)
+    int32_t scpi_send_cmd(int32_t socket_fd, const char* cmd)
     {
-        status = C_FAILURE;
+        int32_t    status = C_SUCCESS;
+        int64_t    send_result = 0;
+
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to scpi_send_cmd");
+        REQUIRES(NULL != cmd, "NULL command string passed to scpi_send_cmd");
+
+        send_result = int64_from_ssize(send(socket_fd, cmd, strlen(cmd), MSG_NOSIGNAL));
+
+        if(0 > send_result)
+        {
+            status = C_FAILURE;
+        }
+
+        return(status);
     }
 
-    return(status);
-}
-
 /*
-## Receive an SCPI command from the power meter
+## Receive an SCPI command from the power analyzer
 
 Takes a user-provided buffer and reads an SCPI response into the buffer.
 
@@ -1697,61 +1744,62 @@ Other changes to system state include:
 - Sets `errno` to `ECONNRESET` when the remote peer closes the connection.
 
 */
-int32_t scpi_recv_line(int32_t socket_fd, char* buffer, uint32_t buffer_length)
-{
-    uint32_t    position = 0u;
-    int32_t     status = C_SUCCESS;
-    char        received_byte = '\0';
-    int64_t     recv_result = 0;
-    bool        accumulating = true;
 
-    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to scpi_recv_line");
-    REQUIRES(NULL != buffer, "NULL buffer pointer passed to scpi_recv_line");
-    REQUIRES(0u < buffer_length, "Zero-length buffer passed to scpi_recv_line");
-
-    while(true == accumulating)
+    int32_t scpi_recv_line(int32_t socket_fd, char* buffer, uint32_t buffer_length)
     {
-        recv_result = int64_from_ssize(recv(socket_fd, &received_byte, 1u, 0));
+        uint32_t    position = 0u;
+        int32_t     status = C_SUCCESS;
+        char        received_byte = '\0';
+        int64_t     recv_result = 0;
+        bool        accumulating = true;
 
-        if(0 > recv_result)
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to scpi_recv_line");
+        REQUIRES(NULL != buffer, "NULL buffer pointer passed to scpi_recv_line");
+        REQUIRES(0u < buffer_length, "Zero-length buffer passed to scpi_recv_line");
+
+        while(true == accumulating)
         {
-            // recv returned -1: a network error occurred, or SO_RCVTIMEO expired.
-            status = C_FAILURE;
-            accumulating = false;
-        }
-        else if(0 == recv_result)
-        {
-            // recv returned 0: the server closed the connection.
-            errno = ECONNRESET;
-            status = C_FAILURE;
-            accumulating = false;
-        }
-        else if('\n' == received_byte)
-        {
-            // End-of-line marker received: stop accumulating.
-            accumulating = false;
-        }
-        else if('\r' == received_byte)
-        {
-            // Bare CR character: discard and continue.
-        }
-        else
-        {
-            // Printable character: accumulate it into the buffer.
-            buffer[position] = received_byte;
-            position = position + 1u;
-            if(position >= (buffer_length - 1u))
+            recv_result = int64_from_ssize(recv(socket_fd, &received_byte, 1u, 0));
+
+            if(0 > recv_result)
             {
-                // Buffer capacity reached: stop to preserve the null-terminator slot.
+                // recv returned -1: a network error occurred, or SO_RCVTIMEO expired.
+                status = C_FAILURE;
                 accumulating = false;
             }
+            else if(0 == recv_result)
+            {
+                // recv returned 0: the server closed the connection.
+                errno = ECONNRESET;
+                status = C_FAILURE;
+                accumulating = false;
+            }
+            else if('\n' == received_byte)
+            {
+                // End-of-line marker received: stop accumulating.
+                accumulating = false;
+            }
+            else if('\r' == received_byte)
+            {
+                // Bare CR character: discard and continue.
+            }
+            else
+            {
+                // Printable character: accumulate it into the buffer.
+                buffer[position] = received_byte;
+                position = position + 1u;
+                if(position >= (buffer_length - 1u))
+                {
+                    // Buffer capacity reached: stop to preserve the null-terminator slot.
+                    accumulating = false;
+                }
+            }
         }
+
+        buffer[position] = '\0';
+
+        return(status);
     }
-
-    buffer[position] = '\0';
-
-    return(status);
-}
 
 /*
 ## Opening the TCP connection
@@ -1772,60 +1820,70 @@ Other changes to system state include:
 - Opens a TCP socket file descriptor in the operating system on success.
 
 */
-int32_t socket_open(const char* host_name, uint32_t port_num)
-{
-    int32_t             socket_fd = C_FAILURE;
-    char                port_num_str[C_PORT_NUM_STR_LEN] = {0};
-    struct addrinfo     hints = {0};
-    struct addrinfo*    res = NULL;
-    struct addrinfo*    rp = NULL;
-    int32_t             gai_result = 0;
-    int32_t             snprintf_result = 0;
-    int32_t             connect_result = 0;
-    bool                connect_succeeded = false;
-    bool                searching = false;
 
-    REQUIRES(NULL != host_name, "NULL host_name passed to socket_open");
-
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    snprintf_result = int32_from_int(snprintf(port_num_str, C_PORT_NUM_STR_LEN, "%u", port_num));
-    ASSERT(0 < snprintf_result, "snprintf failed to format port number %u", port_num);
-
-    // ASDFG-C 6.35 VIOLATION: getaddrinfo returns int; stored in int32_t (equivalent on Linux).
-    gai_result = int32_from_int(getaddrinfo(host_name, port_num_str, &hints, &res));
-
-    if(0 != gai_result)
+    int32_t socket_open(const char* host_name, uint32_t port_num)
     {
-        fprintf(stderr, "socket_open: getaddrinfo(%s:%u): %s\n", host_name, port_num, gai_strerror(gai_result));
-    }
-    else
-    {
-        // Iterate over the resolved addresses and attempt a connection to each in turn,
-        // stopping as soon as one succeeds.
-        rp = res;
-        if(NULL != rp)
+        int32_t             socket_fd = C_FAILURE;
+        char                port_num_str[C_PORT_NUM_STR_LEN] = {0};
+        struct addrinfo     hints = {0};
+        struct addrinfo*    res = NULL;
+        struct addrinfo*    rp = NULL;
+        int32_t             gai_result = 0;
+        int32_t             snprintf_result = 0;
+        int32_t             connect_result = 0;
+        bool                connect_succeeded = false;
+        bool                searching = false;
+
+        REQUIRES(NULL != host_name, "NULL host_name passed to socket_open");
+
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+
+        snprintf_result = int32_from_int(snprintf(port_num_str, C_PORT_NUM_STR_LEN, "%u", port_num));
+        ASSERT(0 < snprintf_result, "snprintf failed to format port number %u", port_num);
+
+        // ASDFG-C 6.35 VIOLATION: getaddrinfo returns int; stored in int32_t (equivalent on Linux).
+        gai_result = int32_from_int(getaddrinfo(host_name, port_num_str, &hints, &res));
+
+        if(0 != gai_result)
         {
-            searching = true;
+            fprintf(stderr, "socket_open: getaddrinfo(%s:%u): %s\n", host_name, port_num, gai_strerror(gai_result));
         }
-
-        while(true == searching)
+        else
         {
-            socket_fd = int32_from_int(socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol));
-
-            if(C_FAILURE != socket_fd)
+            // Iterate over the resolved addresses and attempt a connection to each in turn,
+            // stopping as soon as one succeeds.
+            rp = res;
+            if(NULL != rp)
             {
-                connect_result = connect(socket_fd, rp->ai_addr, rp->ai_addrlen);
-                if(0 == connect_result)
+                searching = true;
+            }
+
+            while(true == searching)
+            {
+                socket_fd = int32_from_int(socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol));
+
+                if(C_FAILURE != socket_fd)
                 {
-                    connect_succeeded = true;
-                    searching = false;
+                    connect_result = connect(socket_fd, rp->ai_addr, rp->ai_addrlen);
+                    if(0 == connect_result)
+                    {
+                        connect_succeeded = true;
+                        searching = false;
+                    }
+                    else
+                    {
+                        close(socket_fd);
+                        socket_fd = C_FAILURE;
+                        rp = rp->ai_next;
+                        if(NULL == rp)
+                        {
+                            searching = false;
+                        }
+                    }
                 }
                 else
                 {
-                    close(socket_fd);
-                    socket_fd = C_FAILURE;
                     rp = rp->ai_next;
                     if(NULL == rp)
                     {
@@ -1833,27 +1891,18 @@ int32_t socket_open(const char* host_name, uint32_t port_num)
                     }
                 }
             }
-            else
+
+            freeaddrinfo(res);
+
+            if(false == connect_succeeded)
             {
-                rp = rp->ai_next;
-                if(NULL == rp)
-                {
-                    searching = false;
-                }
+                fprintf(stderr, "socket_open: cannot reach %s:%u: %s\n", host_name, port_num, strerror(errno));
+                socket_fd = C_FAILURE;
             }
         }
 
-        freeaddrinfo(res);
-
-        if(false == connect_succeeded)
-        {
-            fprintf(stderr, "socket_open: cannot reach %s:%u: %s\n", host_name, port_num, strerror(errno));
-            socket_fd = C_FAILURE;
-        }
+        return(socket_fd);
     }
-
-    return(socket_fd);
-}
 
 /*
 ## Configuring socket I/O timeouts
@@ -1872,29 +1921,30 @@ Other changes to system state include:
 - Sets `SO_RCVTIMEO` and `SO_SNDTIMEO` options on `socket_fd` via `setsockopt`.
 
 */
-int32_t socket_configure_timeouts(int32_t socket_fd)
-{
-    struct timeval    io_timeout = {0};
-    int32_t           status = C_SUCCESS;
-    int32_t           rcvtimeo_result = 0;
-    int32_t           sndtimeo_result = 0;
 
-    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to socket_configure_timeouts");
-
-    io_timeout.tv_sec = C_IO_TIMEOUT_S;
-    io_timeout.tv_usec = 0;
-
-    rcvtimeo_result = setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, socklen_from_size(sizeof(io_timeout)));
-    sndtimeo_result = setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, socklen_from_size(sizeof(io_timeout)));
-
-    if((0 > rcvtimeo_result) || (0 > sndtimeo_result))
+    int32_t socket_configure_timeouts(int32_t socket_fd)
     {
-        fprintf(stderr, "socket_configure_timeouts: setsockopt: %s\n", strerror(errno));
-        status = C_FAILURE;
-    }
+        struct timeval    io_timeout = {0};
+        int32_t           status = C_SUCCESS;
+        int32_t           rcvtimeo_result = 0;
+        int32_t           sndtimeo_result = 0;
 
-    return(status);
-}
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to socket_configure_timeouts");
+
+        io_timeout.tv_sec = C_IO_TIMEOUT_S;
+        io_timeout.tv_usec = 0;
+
+        rcvtimeo_result = setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, socklen_from_size(sizeof(io_timeout)));
+        sndtimeo_result = setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, socklen_from_size(sizeof(io_timeout)));
+
+        if((0 > rcvtimeo_result) || (0 > sndtimeo_result))
+        {
+            fprintf(stderr, "socket_configure_timeouts: setsockopt: %s\n", strerror(errno));
+            status = C_FAILURE;
+        }
+
+        return(status);
+    }
 
 /*
 ## Verify GPM-8310 SCPI Identity
@@ -1913,41 +1963,42 @@ Other changes to system state include:
 - Sends `*IDN?` to the instrument and reads one line of response.
 
 */
-int32_t gpm8310_instrument_identify(int32_t socket_fd)
-{
-    char    resp[C_RESP_BUF_LEN] = {0};
-    char*   idn_match = NULL;
-    int32_t status = C_SUCCESS;
 
-    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_instrument_identify");
-
-    status = scpi_send_cmd(socket_fd, "*IDN?\r\n");
-    if(C_SUCCESS == status)
+    int32_t gpm8310_instrument_identify(int32_t socket_fd)
     {
-        status = scpi_recv_line(socket_fd, resp, C_RESP_BUF_LEN);
-    }
+        char    resp[C_RESP_BUF_LEN] = {0};
+        char*   idn_match = NULL;
+        int32_t status = C_SUCCESS;
 
-    if(C_SUCCESS != status)
-    {
-        fprintf(stderr, "gpm8310_instrument_identify: no response to *IDN?\n");
-    }
-    else
-    {
-        idn_match = strstr(resp, "8310");
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_instrument_identify");
 
-        if(NULL == idn_match)
+        status = scpi_send_cmd(socket_fd, "*IDN?\r\n");
+        if(C_SUCCESS == status)
         {
-            fprintf(stderr, "gpm8310_instrument_identify: unexpected IDN (not a GPM-8310): \"%s\"\n", resp);
-            status = C_FAILURE;
+            status = scpi_recv_line(socket_fd, resp, C_RESP_BUF_LEN);
+        }
+
+        if(C_SUCCESS != status)
+        {
+            fprintf(stderr, "gpm8310_instrument_identify: no response to *IDN?\n");
         }
         else
         {
-            fprintf(stderr, "gpm8310_instrument_identify: connected to: %s\n", resp);
-        }
-    }
+            idn_match = strstr(resp, "8310");
 
-    return(status);
-}
+            if(NULL == idn_match)
+            {
+                fprintf(stderr, "gpm8310_instrument_identify: unexpected IDN (not a GPM-8310): \"%s\"\n", resp);
+                status = C_FAILURE;
+            }
+            else
+            {
+                fprintf(stderr, "gpm8310_instrument_identify: connected to: %s\n", resp);
+            }
+        }
+
+        return(status);
+    }
 
 /*
 ## Configure GPM-8310 for energy accumulation
@@ -1983,90 +2034,89 @@ Other changes to system state include:
 - After a successful return, the instrument integrator is running and energy is being accumulated into slot 1 (total Wh); slots 2-4 report instantaneous voltage, current, and wattage.
 
 */
-int32_t gpm8310_instrument_configure(int32_t socket_fd)
-{
-    int32_t    status = C_SUCCESS;
 
-    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_instrument_configure");
-
-    // Clear the instrument's status registers and error queue.
-    status = scpi_send_cmd(socket_fd, "*CLS\r\n");
-
-    // :RATE 100MS - set the measurement calculation period to 100 ms.
-    // Valid values: 50MS 100MS 200MS 500MS 1S 2S 5S 10S 20S 30S AUTO
-    if(C_SUCCESS == status)
+    int32_t gpm8310_instrument_configure(int32_t socket_fd)
     {
-        status = scpi_send_cmd(socket_fd, ":RATE 100MS\r\n");
-    }
+        int32_t    status = C_SUCCESS;
 
-    // :INTEGrate:FUNCtion WATThour - select watt-hour accumulation.
-    if(C_SUCCESS == status)
-    {
-        status = scpi_send_cmd(socket_fd, ":INTEGrate:FUNCtion WATThour\r\n");
-    }
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_instrument_configure");
 
-    // :INTEGrate:MODE MANual - run continuously until :INTEGrate:STOP is sent.
-    if(C_SUCCESS == status)
-    {
-        status = scpi_send_cmd(socket_fd, ":INTEGrate:MODE MANual\r\n");
-    }
+        // Clear the instrument's status registers and error queue.
+        status = scpi_send_cmd(socket_fd, "*CLS\r\n");
 
-    // :INTEGrate:RESet - zero any previously accumulated energy.
-    if(C_SUCCESS == status)
-    {
-        status = scpi_send_cmd(socket_fd, ":INTEGrate:RESet\r\n");
-    }
+        // :RATE 100MS - set the measurement calculation period to 100 ms.
+        // Valid values: 50MS 100MS 200MS 500MS 1S 2S 5S 10S 20S 30S AUTO
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":RATE 100MS\r\n");
+        }
 
-    // :NUMeric:NORMal:ITEM1 WH - bind read-slot 1 to total accumulated Wh.
-    if(C_SUCCESS == status)
-    {
-        status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM1 WH\r\n");
-    }
+        // :INTEGrate:FUNCtion WATThour - select watt-hour accumulation.
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":INTEGrate:FUNCtion WATThour\r\n");
+        }
 
-    // :NUMeric:NORMal:ITEM2 U - bind read-slot 2 to instantaneous voltage.
-    // "U" is the GPM-8310's function mnemonic for voltage (Command List,
-    // ":NUMeric[:NORMal]:ITEM<x>"), distinct from the "V" physical unit
-    // stored in the corresponding measurand's "meU" field.
-    if(C_SUCCESS == status)
-    {
-        status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM2 U\r\n");
-    }
+        // :INTEGrate:MODE MANual - run continuously until :INTEGrate:STOP is sent.
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":INTEGrate:MODE MANual\r\n");
+        }
 
-    // :NUMeric:NORMal:ITEM3 I - bind read-slot 3 to instantaneous current.
-    if(C_SUCCESS == status)
-    {
-        status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM3 I\r\n");
-    }
+        // :INTEGrate:RESet - zero any previously accumulated energy.
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":INTEGrate:RESet\r\n");
+        }
 
-    // :NUMeric:NORMal:ITEM4 P - bind read-slot 4 to instantaneous active power (wattage).
-    if(C_SUCCESS == status)
-    {
-        status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM4 P\r\n");
-    }
+        // :NUMeric:NORMal:ITEM1 WH - bind read-slot 1 to total accumulated Wh.
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM1 WH\r\n");
+        }
 
-    // :NUMeric:NORMal:NUMber 4 - a parameterless :NUMeric:VALue? query returns
-    // exactly the four slots bound above, comma-separated, in slot order.
-    if(C_SUCCESS == status)
-    {
-        status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:NUMber 4\r\n");
-    }
+        // :NUMeric:NORMal:ITEM2 U - bind read-slot 2 to instantaneous voltage.
+        // "U" is the GPM-8310's function mnemonic for voltage (Command List,
+        // ":NUMeric[:NORMal]:ITEM<x>"), distinct from the "V" physical unit
+        // stored in the corresponding measurand's "meU" field.
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM2 U\r\n");
+        }
 
-    // :INTEGrate:STARt - begin accumulation.
-    if(C_SUCCESS == status)
-    {
-        status = scpi_send_cmd(socket_fd, ":INTEGrate:STARt\r\n");
-    }
+        // :NUMeric:NORMal:ITEM3 I - bind read-slot 3 to instantaneous current.
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM3 I\r\n");
+        }
 
-    return(status);
-}
+        // :NUMeric:NORMal:ITEM4 P - bind read-slot 4 to instantaneous active power (wattage).
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:ITEM4 P\r\n");
+        }
+
+        // :NUMeric:NORMal:NUMber 4 - a parameterless :NUMeric:VALue? query returns
+        // exactly the four slots bound above, comma-separated, in slot order.
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":NUMeric:NORMal:NUMber 4\r\n");
+        }
+
+        // :INTEGrate:STARt - begin accumulation.
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":INTEGrate:STARt\r\n");
+        }
+
+        return(status);
+    }
 
 /*
 ## Connecting to the instrument
 
 `gpm8310_connect` orchestrates the four private setup functions in sequence. If any step fails the socket is closed and `C_FAILURE` is returned, so the caller never receives a descriptor that is in a partially-configured state. On success, the caller is responsible for eventually calling `gpm8310_disconnect`.
-*/
 
-/*
 ### Interactions
 
 | Parameter      | Direction | Type        | Description                                             |
@@ -2081,54 +2131,65 @@ Other changes to system state include:
 - On success, the instrument integrator is running; the caller must call `gpm8310_disconnect` to stop it and close the socket.
 
 */
-int32_t gpm8310_connect(const char* dest_host_name, const char* dest_port_num)
-{
-    int32_t     socket_fd = C_FAILURE;
-    int32_t     step_status = C_SUCCESS;
-    uint16_t    port_num = 0;
 
-    REQUIRES(NULL != dest_host_name, "NULL dest_host_name passed to gpm8310_connect");
-    REQUIRES(NULL != dest_port_num, "NULL dest_port_num passed to gpm8310_connect");
-
-    port_num = strtol(dest_port_num, NULL, 10);
-    socket_fd = socket_open(dest_host_name, port_num);
-
-    if(C_FAILURE == socket_fd)
+    int32_t gpm8310_connect(const char* dest_host_name, const char* dest_port_num)
     {
-        step_status = C_FAILURE;
-    }
+        int32_t     socket_fd = C_FAILURE;
+        int32_t     step_status = C_SUCCESS;
+        uint16_t    port_num = 0;
 
-    if(C_SUCCESS == step_status)
-    {
-        step_status = socket_configure_timeouts(socket_fd);
-    }
+        REQUIRES(NULL != dest_host_name, "NULL dest_host_name passed to gpm8310_connect");
+        REQUIRES(NULL != dest_port_num, "NULL dest_port_num passed to gpm8310_connect");
 
-    if(C_SUCCESS == step_status)
-    {
-        step_status = gpm8310_instrument_identify(socket_fd);
-    }
+        port_num = strtol(dest_port_num, NULL, 10);
+        socket_fd = socket_open(dest_host_name, port_num);
 
-    if(C_SUCCESS == step_status)
-    {
-        step_status = gpm8310_instrument_configure(socket_fd);
-    }
-
-    if(C_SUCCESS != step_status)
-    {
-        if(C_FAILURE != socket_fd)
+        if(C_FAILURE == socket_fd)
         {
-            close(socket_fd);
-            socket_fd = C_FAILURE;
+            step_status = C_FAILURE;
         }
-    }
 
-    return(socket_fd);
-}
+        if(C_SUCCESS == step_status)
+        {
+            step_status = socket_configure_timeouts(socket_fd);
+        }
+
+        if(C_SUCCESS == step_status)
+        {
+            step_status = gpm8310_instrument_identify(socket_fd);
+        }
+
+        if(C_SUCCESS == step_status)
+        {
+            step_status = gpm8310_instrument_configure(socket_fd);
+        }
+
+        if(C_SUCCESS != step_status)
+        {
+            if(C_FAILURE != socket_fd)
+            {
+                close(socket_fd);
+                socket_fd = C_FAILURE;
+            }
+        }
+
+        return(socket_fd);
+    }
 
 /*
 ## Reading GPM-8310 measurements
 
-`gpm8310_read_measurements` queries `:NUMeric:VALue?`, which returns the four values bound to numeric slots 1-4 by `gpm8310_instrument_configure`: total accumulated watt-hours, instantaneous voltage, instantaneous current, and instantaneous wattage, in that slot order. The response is a single comma-separated line of numbers in scientific notation, for example `+1.23450E+00,+1.20000E+02,+5.00000E-01,+6.00000E+01`, parsed in order with `strtod`. Reading all four quantities with one query keeps each polling iteration well within the `C_POLL_INTERVAL_NS` cadence.
+`gpm8310_read_measurements` sends one SCPI command and reads one response, returning four comma-separated values in slot order: total watt-hours (slot 1), voltage (slot 2), current (slot 3), wattage (slot 4).
+
+When `do_reset` is false, the command is a plain `:NUMeric:VALue?`. When `do_reset` is true, the command is the compound message:
+
+```
+:NUMeric:VALue?;:INTEGrate:RESet;:INTEGrate:STARt
+```
+
+`:NUMeric:VALue?` appears first, so its response reflects the counter value immediately before the reset. The instrument processes the remaining sub-commands (reset and restart) before making the response available to the host, so the counter is always zeroed before the next poll reads it. Both paths are one `scpi_send_cmd` + one `scpi_recv_line`; the reset-path sends a longer string on the wire but has no additional network round trips.
+
+For the reset-path, `wh_out` receives the counter snapshot taken *before* the reset, not the value after (which is zero). The caller (`gpm8310_collect_values`) is responsible for adding this snapshot to its software accumulator.
 
 The use of floating point is unavoidable here: the GPM-8310 reports measurements in scientific notation and `strtod` returns `double`. See the annotation below for the corresponding rule deviation.
 
@@ -2136,101 +2197,116 @@ The use of floating point is unavoidable here: the GPM-8310 reports measurements
 
 ### Interactions
 
-| Parameter     | Direction | Type    | Description                                                              |
-| ------------- | --------- | ------- | ------------------------------------------------------------------------- |
-| socket_fd     | in        | int32_t | Socket file descriptor returned by `gpm8310_connect`.                     |
-| wh_out        | out       | double* | Receives the accumulated watt-hours (slot 1) on success. Not written on failure. |
-| voltage_out   | out       | double* | Receives the instantaneous voltage (slot 2) on success. Not written on failure.  |
-| current_out   | out       | double* | Receives the instantaneous current (slot 3) on success. Not written on failure.  |
-| wattage_out   | out       | double* | Receives the instantaneous wattage (slot 4) on success. Not written on failure.  |
-| return value  | out       | int32_t | C_SUCCESS on success, C_FAILURE on failure.                               |
+| Parameter     | Direction | Type    | Description                                                                        |
+| ------------- | --------- | ------- | -----------------------------------------------------------------------------------|
+| socket_fd     | in        | int32_t | Socket file descriptor returned by `gpm8310_connect`.                              |
+| do_reset      | in        | bool    | If true, sends the compound read/RESET/START command instead of a plain read.      |
+| wh_out        | out       | double* | Receives watt-hours (slot 1 snapshot) on success. Not written on failure.          |
+| voltage_out   | out       | double* | Receives instantaneous voltage (slot 2) on success. Not written on failure.        |
+| current_out   | out       | double* | Receives instantaneous current (slot 3) on success. Not written on failure.        |
+| wattage_out   | out       | double* | Receives instantaneous wattage (slot 4) on success. Not written on failure.        |
+| return value  | out       | int32_t | C_SUCCESS on success, C_FAILURE on failure.                                        |
 
 Other changes to system state include:
 
-- Sends `:NUMeric:VALue?` to the instrument and reads one line of response.
+- Sends one SCPI command and reads one line of response.
+- When `do_reset` is true, the instrument integrator is reset and restarted as a side effect.
 - Sets `errno` to 0 before each `strtod` call.
 
 */
-int32_t gpm8310_read_measurements(int32_t socket_fd, double* wh_out, double* voltage_out, double* current_out, double* wattage_out)
-{
-    char       resp[C_RESP_BUF_LEN] = {0};
-    char*      parse_pos = NULL;
-    char*      parse_end = NULL;
-    double     values[C_MEASURAND_COUNT] = {0};
-    uint32_t   value_index = 0U;
-    int32_t    status = C_SUCCESS;
 
-    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_read_measurements");
-    REQUIRES(NULL != wh_out, "NULL wh_out pointer passed to gpm8310_read_measurements");
-    REQUIRES(NULL != voltage_out, "NULL voltage_out pointer passed to gpm8310_read_measurements");
-    REQUIRES(NULL != current_out, "NULL current_out pointer passed to gpm8310_read_measurements");
-    REQUIRES(NULL != wattage_out, "NULL wattage_out pointer passed to gpm8310_read_measurements");
-
-    // :NUMeric:VALue? returns one value per configured ITEM slot, comma-separated.
-    // gpm8310_instrument_configure binds exactly C_MEASURAND_COUNT slots (WH, U,
-    // I, P) and sets :NUMeric:NORMal:NUMber to match, so a single parameterless
-    // query returns all four readings in slot order, e.g.
-    // "+1.23450E+00,+1.20000E+02,+5.00000E-01,+6.00000E+01".
-    status = scpi_send_cmd(socket_fd, ":NUMeric:VALue?\r\n");
-    if(C_SUCCESS == status)
+    int32_t gpm8310_read_measurements(int32_t socket_fd, bool do_reset, double* wh_out, double* voltage_out, double* current_out, double* wattage_out)
     {
-        status = scpi_recv_line(socket_fd, resp, C_RESP_BUF_LEN);
-    }
+        // Normal path: plain numeric query.
+        static const char C_CMD_READ[]  = ":NUMeric:VALue?\r\n";
 
-    if(C_SUCCESS != status)
-    {
-        fprintf(stderr, "gpm8310_read_measurements: communication failed: %s\n", strerror(errno));
-    }
-    else
-    {
-        parse_pos = resp;
-        value_index = 0U;
+        // Reset path: compound command that reads the current counter value and
+        // then resets and restarts the integrator in a single send/recv round trip.
+        // ":NUMeric:VALue?" is first, so its response reflects the counter value
+        // before the reset. ":INTEGrate:RESet" zeros the counter; ":INTEGrate:STARt"
+        // resumes accumulation from zero. The instrument processes the three
+        // sub-commands sequentially before making the response available to the
+        // host, so the counter is always zeroed before the next poll reads it.
+        // Note: :NUMeric:HOLD is not used here because it is not listed in the
+        // GPM-8310 command set (User Manual Rev. C). The energy accumulated
+        // between the :NUMeric:VALue? execution and the :INTEGrate:RESet execution
+        // is purely instrument-internal command processing time and is negligible
+        // relative to the instrument's 0.001 Wh resolution floor.
+        static const char C_CMD_RESET[] = ":NUMeric:VALue?;:INTEGrate:RESet;:INTEGrate:STARt\r\n";
 
-        while((C_SUCCESS == status) && (value_index < C_MEASURAND_COUNT))
+        char       resp[C_RESP_BUF_LEN] = {0};
+        char*      parse_pos = NULL;
+        char*      parse_end = NULL;
+        double     values[C_MEASURAND_COUNT] = {0};
+        uint32_t   value_index = 0U;
+        int32_t    status = C_SUCCESS;
+
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_read_measurements");
+        REQUIRES(NULL != wh_out, "NULL wh_out pointer passed to gpm8310_read_measurements");
+        REQUIRES(NULL != voltage_out, "NULL voltage_out pointer passed to gpm8310_read_measurements");
+        REQUIRES(NULL != current_out, "NULL current_out pointer passed to gpm8310_read_measurements");
+        REQUIRES(NULL != wattage_out, "NULL wattage_out pointer passed to gpm8310_read_measurements");
+
+        status = scpi_send_cmd(socket_fd, (true == do_reset) ? C_CMD_RESET : C_CMD_READ);
+        if(C_SUCCESS == status)
         {
-            // Clear errno before strtod so that ERANGE detection is reliable.
-            errno = 0;
+            status = scpi_recv_line(socket_fd, resp, C_RESP_BUF_LEN);
+        }
 
-            // ASDFG-C 6.23 VIOLATION: Floating point is unavoidable here. The GPM-8310
-            // reports measurements in scientific notation and strtod returns double.
-            values[value_index] = strtod(parse_pos, &parse_end);
+        if(C_SUCCESS != status)
+        {
+            fprintf(stderr, "gpm8310_read_measurements: communication failed: %s\n", strerror(errno));
+        }
+        else
+        {
+            parse_pos = resp;
+            value_index = 0U;
 
-            if(parse_end == parse_pos)
+            while((C_SUCCESS == status) && (value_index < C_MEASURAND_COUNT))
             {
-                // strtod consumed zero characters: the response is not a number.
-                fprintf(stderr, "gpm8310_read_measurements: non-numeric response: \"%s\"\n", resp);
-                status = C_FAILURE;
-            }
-            else if(ERANGE == errno)
-            {
-                // strtod set ERANGE: the parsed value overflowed or underflowed double.
-                fprintf(stderr, "gpm8310_read_measurements: value out of range: \"%s\"\n", resp);
-                status = C_FAILURE;
-            }
-            else
-            {
-                // Advance past the separating comma, if present, before parsing the next value.
-                parse_pos = parse_end;
-                if(',' == *parse_pos)
+                // Clear errno before strtod so that ERANGE detection is reliable.
+                errno = 0;
+
+                // ASDFG-C 6.23 VIOLATION: Floating point is unavoidable here. The GPM-8310
+                // reports measurements in scientific notation and strtod returns double.
+                values[value_index] = strtod(parse_pos, &parse_end);
+
+                if(parse_end == parse_pos)
                 {
-                    parse_pos = parse_pos + 1;
+                    // strtod consumed zero characters: the response is not a number.
+                    fprintf(stderr, "gpm8310_read_measurements: non-numeric response: \"%s\"\n", resp);
+                    status = C_FAILURE;
                 }
+                else if(ERANGE == errno)
+                {
+                    // strtod set ERANGE: the parsed value overflowed or underflowed double.
+                    fprintf(stderr, "gpm8310_read_measurements: value out of range: \"%s\"\n", resp);
+                    status = C_FAILURE;
+                }
+                else
+                {
+                    // Advance past the separating comma, if present, before parsing the next value.
+                    parse_pos = parse_end;
+                    if(',' == *parse_pos)
+                    {
+                        parse_pos = parse_pos + 1;
+                    }
 
-                value_index = value_index + 1U;
+                    value_index = value_index + 1U;
+                }
             }
         }
-    }
 
-    if(C_SUCCESS == status)
-    {
-        *wh_out      = values[C_MEASURAND_WH];
-        *voltage_out = values[C_MEASURAND_VOLTAGE];
-        *current_out = values[C_MEASURAND_CURRENT];
-        *wattage_out = values[C_MEASURAND_WATTAGE];
-    }
+        if(C_SUCCESS == status)
+        {
+            *wh_out      = values[C_MEASURAND_WH];
+            *voltage_out = values[C_MEASURAND_VOLTAGE];
+            *current_out = values[C_MEASURAND_CURRENT];
+            *wattage_out = values[C_MEASURAND_WATTAGE];
+        }
 
-    return(status);
-}
+        return(status);
+    }
 
 /*
 ## Disconnecting from the instrument
@@ -2249,36 +2325,37 @@ Other changes to system state include:
 - Closes the socket file descriptor.
 
 */
-int32_t gpm8310_disconnect(int32_t socket_fd)
-{
-    int32_t    stop_status = C_SUCCESS;
-    int32_t    remote_status = C_SUCCESS;
-    int32_t    close_result = C_SUCCESS;
 
-    REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_disconnect");
-
-    // Best-effort: stop the integrator. An error is logged but does not prevent disconnect.
-    stop_status = scpi_send_cmd(socket_fd, ":INTEGrate:STOP\r\n");
-    if(C_SUCCESS != stop_status)
+    int32_t gpm8310_disconnect(int32_t socket_fd)
     {
-        fprintf(stderr, "gpm8310_disconnect: failed to stop integrator: %s\n", strerror(errno));
-    }
+        int32_t    stop_status = C_SUCCESS;
+        int32_t    remote_status = C_SUCCESS;
+        int32_t    close_result = C_SUCCESS;
 
-    // Best-effort: restore local operation on the power meter.
-    remote_status = scpi_send_cmd(socket_fd, ":COMMunicate:REMote OFF\r\n");
-    if(C_SUCCESS != remote_status)
-    {
-        fprintf(stderr, "gpm8310_disconnect: failed to restore local mode: %s\n", strerror(errno));
-    }
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_disconnect");
 
-    close_result = close(socket_fd);
-    if(C_SUCCESS != close_result)
-    {
-        fprintf(stderr, "gpm8310_disconnect: close failed: %s\n", strerror(errno));
-    }
+        // Best-effort: stop the integrator. An error is logged but does not prevent disconnect.
+        stop_status = scpi_send_cmd(socket_fd, ":INTEGrate:STOP\r\n");
+        if(C_SUCCESS != stop_status)
+        {
+            fprintf(stderr, "gpm8310_disconnect: failed to stop integrator: %s\n", strerror(errno));
+        }
 
-    return(C_SUCCESS);
-}
+        // Best-effort: restore local operation on the power analyzer.
+        remote_status = scpi_send_cmd(socket_fd, ":COMMunicate:REMote OFF\r\n");
+        if(C_SUCCESS != remote_status)
+        {
+            fprintf(stderr, "gpm8310_disconnect: failed to restore local mode: %s\n", strerror(errno));
+        }
+
+        close_result = close(socket_fd);
+        if(C_SUCCESS != close_result)
+        {
+            fprintf(stderr, "gpm8310_disconnect: close failed: %s\n", strerror(errno));
+        }
+
+        return(C_SUCCESS);
+    }
 
 /*
 ## Format the current UTC time as an ISO 8601 microsecond-precision string

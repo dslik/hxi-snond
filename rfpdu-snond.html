@@ -1,0 +1,2640 @@
+//<!DOCTYPE html><html><title>RedFish PDU sensor daemon</title><xmp theme="united" style="display:none;">
+/*
+## Overview
+
+Polls and writes sensor data from a Redfish-capable rack PDU over HTTP.
+
+Sensor data is written in <a href="https://www.snon.org/">SNON 4</a> format. The daemon opens a raw TCP connection to the PDU's HTTP port, creates initial SNON device, sensor, series, and measurand records on first run, then enters a continuous polling loop until SIGINT. Each poll issues a single HTTP GET to `/redfish/v1/PowerEquipment/RackPDUs/1/Metrics` and extracts two fields: `PowerWatts.Reading` (instantaneous wattage in W) and `EnergykWh.Reading` (cumulative energy in kWh). Each quantity has its own measurand, sensor, and series; all readings are accumulated in memory and written as two separate SNON value fragments at the end of the session.
+
+The HTTP connection is kept alive across polls. If the server closes the connection the daemon reconnects once and retries the failed poll before giving up.
+
+Known issues:
+
+- Missing structured logging
+- Move helper functions into separate source files
+- Reconnect and resume if repeated connection failures occur
+- Redfish endpoint path is hardcoded; add a command-line option for the PDU index
+
+*/
+
+    // ---------------------------------------------------------------------------------
+    // RedFish PDU Sensor Daemon - Main routines
+    // ---------------------------------------------------------------------------------
+    // Polls and writes out sensor data from a Redfish-capable rack PDU over HTTP.
+    // Sensor data is written in SNON 4 format.
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/rfpdu-snond/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+
+    #include <errno.h>          // errno, ECONNRESET, EEXIST, ENOENT
+    #include <netdb.h>          // getaddrinfo, freeaddrinfo, struct addrinfo, gai_strerror
+    #include <stdint.h>         // Fixed-width integer types: int32_t, uint32_t
+    #include <stdbool.h>        // bool, true, false
+    #include <stdio.h>          // fprintf, snprintf, stderr
+    #include <stdlib.h>         // NULL, strtol, malloc, free
+    #include <string.h>         // strlen, strstr, strerror, strncpy, strcmp, strncmp
+    #include <unistd.h>         // close, access, symlink, read, write, R_OK, W_OK
+    #include <limits.h>         // PATH_MAX
+    #include <time.h>           // clock_gettime, gmtime_r, nanosleep, struct timespec, struct tm
+    #include <getopt.h>         // getopt, optarg
+    #include <fcntl.h>          // open, O_RDONLY, O_RDWR, O_CREAT, O_EXCL
+    #include <signal.h>         // sigaction, sigemptyset, raise, SIGINT, SA_RESTART, struct sigaction
+    #include <sys/socket.h>     // socket, connect, recv, send, setsockopt, MSG_NOSIGNAL, MSG_WAITALL, SOL_SOCKET, SO_RCVTIMEO, SO_SNDTIMEO
+    #include <sys/stat.h>       // mkdir, fstat, struct stat, S_IRUSR, S_IWUSR, S_IRWXU
+    #include <sys/time.h>       // struct timeval
+    #include <dirent.h>         // opendir, readdir, closedir, DIR, struct dirent
+
+    // Local includes
+    #include "asdfg-c-types.h"  // Type conversion helper functions
+    #include "asdfg-c-dbc.h"    // Design-by-contract library
+    #include "asdfg-c-uuid.h"   // UUID library
+    #include "cJSON.h"          // cJSON library
+
+/*
+### Project constants
+
+Constants for connecting to the device and for polling via the Redfish API over HTTP.
+*/
+
+    // General
+    #define C_SUCCESS                   (0)             // Function return indicating success
+    #define C_FAILURE                   (-1)            // Function return indicating failure
+
+    // Connections
+    #define C_IO_TIMEOUT_S              (2)             // Seconds to wait for a send or receive before giving up
+    #define C_PORT_NUM_STR_LEN          (16u)           // TCP/IP port string buffer length for getaddrinfo
+
+    // HTTP
+    #define C_HTTP_REQUEST_BUF_LEN      1024U           // Buffer for building the GET request line and headers
+    #define C_HTTP_LINE_BUF_LEN         512U            // Buffer for reading a single HTTP response header line
+    #define C_HTTP_BODY_BUF_LEN         2048U           // Buffer for the JSON response body
+    #define C_AUTH_HEADER_LEN           256U            // Buffer for "Basic <base64(user:password)>"
+    #define C_CREDENTIALS_BUF_LEN       256U            // Intermediate "user:password" buffer in rfpdu_connect
+    #define C_REDFISH_PATH              "/redfish/v1/PowerEquipment/RackPDUs/1/Metrics"  // Hardcoded Redfish metrics endpoint
+
+    // Polling interval
+    #define C_POLL_INTERVAL_NS          23000000L       // 23 ms in nanoseconds
+    #define C_NS_PER_SECOND             1000000000      // 1 s in nanoseconds
+
+    // Tracked measurands
+    #define C_MEASURAND_COUNT           2U              // Number of quantities polled and tracked per session
+    #define C_MEASURAND_WATTS           0U              // Index of the wattage (PowerWatts.Reading) measurand
+    #define C_MEASURAND_KWH             1U              // Index of the cumulative energy (EnergykWh.Reading) measurand
+
+    // ISO 8601 timestamp
+    #define C_ISO8601_LEN               28U             // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
+
+    // SNON JSON field keys
+    #define C_SNON_EID_KEY              "eID"           // SNON entity identifier field key
+    #define C_SNON_EC_KEY               "eC"            // SNON entity class field key
+    #define C_SNON_EN_KEY               "eN"            // SNON entity name field key
+    #define C_SNON_ER_KEY               "eR"            // SNON entity relation field key
+    #define C_SNON_LANG_DEFAULT         "*"             // SNON wildcard language tag for default name
+    #define C_SNON_SERIES_CLASS         "series"        // SNON entity class value for series records
+
+    // SNON URN constants
+    #define C_URN_UUID_PREFIX           "urn:uuid:"     // URN prefix prepended to each entity UUID
+    #define C_URN_UUID_PREFIX_LEN       9U              // Byte length of C_URN_UUID_PREFIX (no null)
+    #define C_SNON_EID_LEN              46U             // Buffer size for "urn:uuid:<UUID>\0" (9 + 36 + 1)
+
+    // Miscellaneous
+    #define C_JSON_EXT                  ".json"         // JSON file extension string
+    #define C_JSON_EXT_LEN              5U              // Byte length of C_JSON_EXT (no null)
+
+/*
+### Project types
+
+Local types
+*/
+
+    // Static definition of a tracked measurand: its human-readable name
+    // (shared by its measurand, sensor, and series entities) and its SNON
+    // "meU" physical unit string.
+    typedef struct
+    {
+        const char* name;
+        const char* unit;
+    } rfpdu_measurand_def_t;
+
+    // Holds the per-session series UUID created for each tracked measurand,
+    // indexed by the C_MEASURAND_* constants.
+    typedef struct
+    {
+        char uuid[C_MEASURAND_COUNT][C_UUID_LEN];
+    } rfpdu_series_set_t;
+
+    // Holds connection state for a RedFish PDU session: the active socket
+    // descriptor, reconnect parameters, and the pre-computed HTTP Basic
+    // authentication header value. socket_fd is C_FAILURE when disconnected.
+    typedef struct
+    {
+        int32_t     socket_fd;                      // Active TCP socket, or C_FAILURE if not connected
+        const char* host_name;                      // Hostname or IP address; used for reconnect and Host header
+        uint16_t    port_num;                       // TCP port; used for reconnect
+        char        auth_header[C_AUTH_HEADER_LEN]; // "Basic <base64(user:password)>" pre-computed at connect time
+    } rfpdu_connection_t;
+
+/*
+### Project prototypes
+
+Local functions
+*/
+
+    int main(int argc, char* argv[]);
+    int32_t rfpdu_collect_values(const char* snon_path, rfpdu_connection_t* conn, const rfpdu_series_set_t* series_set);
+
+    // SNON filesystem layout helpers (Section 8)
+    int32_t snon_validate_dir(const char* snon_path, int32_t mode);
+    int32_t rfpdu_create_snon_definitions(const char* snon_path, const char* device_uuid, rfpdu_series_set_t* series_set_out);
+    int32_t rfpdu_create_measurand_chain(const char* snon_path, const char* device_uuid, const char* measurand_name, const char* measurand_unit, char* series_uuid_out);
+    int32_t rfpdu_find_sensor_uuid(const char* snon_path, const char* device_uuid, const char* measurand_uuid, char* sensor_uuid_out);
+    int32_t rfpdu_find_series_uuid(const char* snon_path, const char* sensor_uuid, const char* measurand_uuid, char* series_uuid_out);
+    int32_t rfpdu_ensure_measurand(const char* snon_path, const char* measurand_name, const char* measurand_unit, char* measurand_uuid_out);
+    int32_t rfpdu_make_dir_if_missing(const char* path);
+    int32_t rfpdu_create_symlink_pair(const char* link_dir, const char* uuid, const char* rel_file_target, const char* rel_dir_target);
+    void    snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name);
+    void    string_replace_char(char* string, char find_byte, char replace_byte);
+
+    // HTTP transport routines
+    int32_t socket_send(int32_t socket_fd, const char* data);
+    int32_t socket_recv_line(int32_t socket_fd, char* buffer, uint32_t buffer_length);
+    int32_t http_send_get(int32_t socket_fd, const char* path, const char* host_name, const char* auth_header);
+    int32_t http_recv_body(int32_t socket_fd, char* body_buf, uint32_t body_buf_len);
+
+    // Socket utility routines
+    int32_t socket_open(const char* host_name, uint32_t port_num);
+    int32_t socket_configure_timeouts(int32_t socket_fd);
+
+    // RedFish PDU access routines
+    static int32_t rfpdu_http_get_measurements(int32_t socket_fd, const char* host_name, const char* auth_header, double* watts_out, double* kwh_out);
+    int32_t rfpdu_read_measurements(rfpdu_connection_t* conn, double* watts_out, double* kwh_out);
+    int32_t rfpdu_verify(rfpdu_connection_t* conn);
+    int32_t rfpdu_connect(const char* host_name, const char* port_str, const char* username, const char* password, rfpdu_connection_t* conn_out);
+    int32_t rfpdu_disconnect(rfpdu_connection_t* conn);
+
+    // String utility routines
+    int32_t base64_encode(const char* input, size_t input_len, char* output, size_t output_len);
+
+    // ASDFG-C 6.18 VIOLATION: POSIX sigaction handler signature requires int signum; no fixed-width alternative
+    static void signal_handler(int32_t signum);
+
+    // Utility functions that should be moved into common libraries
+    char* iso8601_time(char* buf, size_t len);
+
+/*
+### Project globals
+
+Global variables
+*/
+
+    const char* g_usage = "Usage: rfpdu-snond [options]\n"
+                          "\n"
+                          "Options:\n"
+                          "  -a HOST     Hostname or IP address of the RedFish PDU\n"
+                          "  -p PORT     HTTP port where the PDU listens (default: 80)\n"
+                          "  -U USER     Username for HTTP Basic authentication (required)\n"
+                          "  -P PASS     Password for HTTP Basic authentication (required)\n"
+                          "  -s SNONDIR  Location to read and write SNON files (default: ./snon/)\n"
+                          "  -u UUID     Device UUID (default: randomly generated)\n"
+                          "  -h          Show this help message\n";
+
+    static volatile sig_atomic_t g_abort_collect = false;
+
+    // Static definitions for the two quantities tracked each session, indexed
+    // by the C_MEASURAND_* constants. Each entry's name is shared by its
+    // measurand, sensor, and series entities; unit is the SNON "meU" value.
+    static const rfpdu_measurand_def_t g_measurand_defs[C_MEASURAND_COUNT] =
+    {
+        { "Wattage",            "W"   },   // PowerWatts.Reading
+        { "Cumulative Energy",  "kWh" }    // EnergykWh.Reading
+    };
+
+/*
+## RedFish PDU sensor daemon entry point
+
+Parses command-line arguments, opens and validates the HTTP connection to the RedFish PDU, creates initial SNON device, sensor, measurand, and series records on first run, then delegates continuous sensor value collection to `rfpdu_collect_values`.
+
+The daemon runs until it receives a SIGINT signal, at which point the signal handler sets `g_abort_collect` and the collection loop exits cleanly on its next polling iteration.
+
+### Interactions
+
+| Parameter       | Direction | Type         | Description                                                   |
+| --------------- | --------- | ------------ | ------------------------------------------------------------- |
+| argc            | in        | int          | POSIX count of command-line arguments; always >= 1            |
+| argv            | in        | char*[]      | POSIX argument vector; argv[0] is the program name            |
+| return value    | out       | int          | EXIT_SUCCESS (0) on clean exit; EXIT_FAILURE (1) on any error |
+
+Other changes to system state include:
+
+- Creates `devices/<uuid>.json` on first run; skipped without error on subsequent runs.
+- Creates `measurands/<uuid>.json` for each of "Wattage" and "Cumulative Energy" on first run; skipped if a measurand already exists.
+- Creates `sensors/<uuid>.json` for each of the two measurands on first run, one per device/measurand pair; skipped without error on subsequent runs.
+- Creates a new `series/<uuid>.json` and `series/<uuid>/values/` for each of the two measurands on every run (one series per measurand per session).
+- Creates relative symlink pairs linking the device to each sensor and each sensor to its series (Section 8.7).
+- Opens and closes a TCP/IP connection to the host specified by -a and the port specified by -p.
+
+*/
+
+    int main(int argc, char* argv[])
+    {
+        int32_t                 opt = 0;
+        const char*             device_addr = "127.0.0.1";
+        const char*             device_port = "80";
+        const char*             username = NULL;
+        const char*             password = NULL;
+        const char*             snon_path = "./snon/";
+        const char*             uuid_arg = NULL;
+        char                    device_uuid[C_UUID_LEN] = {0};
+        rfpdu_series_set_t      series_set = {0};
+        rfpdu_connection_t      conn = {0};
+
+        conn.socket_fd = C_FAILURE;
+
+        // Obtain command line arguments
+        while(C_FAILURE != opt)
+        {
+            opt = getopt(argc, argv, "a:p:U:P:s:u:h");
+
+            switch(opt)
+            {
+                case 'a':
+                {
+                    device_addr = optarg;
+                    break;
+                }
+                case 'p':
+                {
+                    device_port = optarg;
+                    break;
+                }
+                case 'U':
+                {
+                    username = optarg;
+                    break;
+                }
+                case 'P':
+                {
+                    password = optarg;
+                    break;
+                }
+                case 's':
+                {
+                    snon_path = optarg;
+                    break;
+                }
+                case 'u':
+                {
+                    uuid_arg = optarg;
+                    break;
+                }
+                case 'h':
+                {
+                    fprintf(stdout, "%s", g_usage);
+                    return(EXIT_SUCCESS);
+                }
+                case '?':
+                {
+                    fprintf(stderr, "%s", g_usage);
+                    return(EXIT_FAILURE);
+                }
+                case C_FAILURE:
+                {
+                    // getopt has finished; the while condition will exit the loop.
+                    break;
+                }
+                default:
+                {
+                    break;
+                }
+            }
+        }
+
+        // ===========================================================
+        // Validate Inputs
+
+        if(NULL == username)
+        {
+            fprintf(stderr, "Error: username (-U) is required\n\n%s", g_usage);
+            return(EXIT_FAILURE);
+        }
+
+        if(NULL == password)
+        {
+            fprintf(stderr, "Error: password (-P) is required\n\n%s", g_usage);
+            return(EXIT_FAILURE);
+        }
+
+        if(C_FAILURE == snon_validate_dir(snon_path, R_OK | W_OK))
+        {
+            fprintf(stderr, "Invalid SNON directory: %s\n", snon_path);
+            perror(snon_path);
+            return(EXIT_FAILURE);
+        }
+
+        // Validate or generate UUID
+        if(NULL != uuid_arg)
+        {
+            if(false == is_valid_uuid(uuid_arg))
+            {
+                fprintf(stderr, "Invalid UUID format: %s\n", uuid_arg);
+                return(EXIT_FAILURE);
+            }
+
+            memcpy(device_uuid, uuid_arg, sizeof(device_uuid));
+        }
+        else
+        {
+            if(C_FAILURE == generate_random_uuid(device_uuid))
+            {
+                fprintf(stderr, "Error generating random UUID\n");
+                return(EXIT_FAILURE);
+            }
+        }
+
+        // ===========================================================
+        // Connect to the RedFish PDU and verify the endpoint is reachable
+        if(C_FAILURE == rfpdu_connect(device_addr, device_port, username, password, &conn))
+        {
+            fprintf(stderr, "Unable to connect to RedFish PDU at %s:%s\n", device_addr, device_port);
+            return(EXIT_FAILURE);
+        }
+
+        // ===========================================================
+        // Create SNON entity records for this device and obtain the per-measurand
+        // series UUIDs for this session. Device, measurand, and sensor records are
+        // created only on the first run; a new series is created for each measurand
+        // on every run (one set per session).
+        if(C_FAILURE == rfpdu_create_snon_definitions(snon_path, device_uuid, &series_set))
+        {
+            fprintf(stderr, "Error creating SNON definition records\n");
+            rfpdu_disconnect(&conn);
+            return(EXIT_FAILURE);
+        }
+
+        // ===========================================================
+        // Collect PDU readings and write them to the SNON tree
+        if(C_FAILURE == rfpdu_collect_values(snon_path, &conn, &series_set))
+        {
+            fprintf(stderr, "Error writing SNON value record\n");
+            rfpdu_disconnect(&conn);
+            return(EXIT_FAILURE);
+        }
+
+        rfpdu_disconnect(&conn);
+        return(EXIT_SUCCESS);
+    }
+
+/*
+## Collect RedFish PDU measurements
+
+Accumulates wattage and cumulative energy readings from the RedFish PDU into two in-memory SNON value fragments (one per measurand), then writes each fragment to disk as a timestamped value file when the session ends.
+
+Each polling iteration issues one HTTP GET (via `rfpdu_read_measurements`) and extracts `PowerWatts.Reading` and `EnergykWh.Reading`. If the HTTP connection is closed by the server between polls, `rfpdu_read_measurements` reconnects and retries transparently; `rfpdu_collect_values` sees only the final C_SUCCESS or C_FAILURE outcome.
+
+Installs a SIGINT handler that sets `g_abort_collect`, causing the polling loop to exit cleanly. On exit the handler is unregistered. Each fragment is written to `series/<series_set->uuid[i]>/values/<start_timestamp>.json`, where `<start_timestamp>` is the ISO 8601 UTC timestamp of the first poll with colons replaced by hyphens (Section 8.6), shared by both files. Files are written even if a read error interrupted the session, provided at least one reading was captured before the error; writes for one measurand are attempted independently of the outcome for another.
+
+### Interactions
+
+| Parameter       | Direction | Type                 | Description                                                              |
+| --------------- | --------- | -------------------- | ------------------------------------------------------------------------ |
+| snon_path       | in        | const char*          | SNON root path. Must not be NULL. Must end with '/'.                     |
+| conn            | in/out    | rfpdu_connection_t*  | Active connection; socket_fd may be updated if a reconnect occurs.       |
+| series_set      | in        | const rfpdu_series_set_t* | Per-measurand series UUIDs whose `eID` appears in each value fragment.|
+| return value    | out       | int32_t              | C_SUCCESS on clean exit; C_FAILURE on any I/O or device error.           |
+| g_abort_collect | shared    | sig_atomic_t         | Global flag; polled each iteration; written true by signal_handler.      |
+
+Other changes to system state include:
+
+- Installs and restores the SIGINT handler via sigaction with SA_RESTART.
+- Creates up to C_MEASURAND_COUNT JSON files, one at `series/<uuid>/values/<timestamp>.json` per measurand.
+- Calls nanosleep between successful poll iterations to maintain the C_POLL_INTERVAL_NS cadence.
+
+*/
+
+    int32_t rfpdu_collect_values(const char* snon_path, rfpdu_connection_t* conn, const rfpdu_series_set_t* series_set)
+    {
+        struct sigaction    signal_action = {0};
+        struct sigaction    old_signal_action = {0};
+        bool                should_poll = true;
+        struct timespec     poll_start = {0};
+        struct timespec     poll_end = {0};
+        struct timespec     sleep_duration = {0};
+        double              readings[C_MEASURAND_COUNT] = {0};
+        char                timestamp[C_ISO8601_LEN] = {0};
+        char                first_timestamp[C_ISO8601_LEN] = {0};
+        int64_t             poll_start_nsec = 0;
+        int64_t             poll_end_nsec = 0;
+        int64_t             remaining_ns = 0;
+        int32_t             return_status = C_SUCCESS;
+        cJSON*              snon_array[C_MEASURAND_COUNT] = {0};
+        cJSON*              snon_entry = NULL;
+        cJSON*              v_array[C_MEASURAND_COUNT] = {0};
+        cJSON*              vt_array = NULL;
+        char                snon_dpath[PATH_MAX] = {0};
+        char                eid_string[C_SNON_EID_LEN] = {0};
+        char                num_str[32] = {0};
+        char*               snon_output = NULL;
+        int32_t             snon_fd = C_FAILURE;
+        size_t              data_len = 0U;
+        ssize_t             data_written_len = 0;
+        bool                first_poll = true;
+        uint32_t            measurand_index = 0U;
+
+        REQUIRES(NULL != snon_path, "NULL pointer passed for snon_path");
+        REQUIRES(NULL != conn, "NULL pointer passed for conn");
+        REQUIRES(NULL != series_set, "NULL pointer passed for series_set");
+
+        // Build the two SNON value fragments that accumulate all readings for
+        // this session, one per tracked measurand. Each outer array holds
+        // exactly one fragment object; the eID references that measurand's
+        // series entity (Section 8.9). The v and vT arrays are left empty
+        // here and populated during the polling loop below.
+        measurand_index = 0U;
+        while(measurand_index < C_MEASURAND_COUNT)
+        {
+            snon_array[measurand_index] = cJSON_CreateArray();
+            ASSERT(NULL != snon_array[measurand_index], "cJSON_CreateArray() returned NULL; memory exhausted");
+
+            snon_entry = cJSON_CreateObject();
+            ASSERT(NULL != snon_entry, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+            snprintf(eid_string, sizeof(eid_string), "urn:uuid:%s", series_set->uuid[measurand_index]);
+            cJSON_AddItemToObjectCS(snon_entry, "eID", cJSON_CreateString(eid_string));
+
+            v_array[measurand_index] = cJSON_CreateArray();
+            ASSERT(NULL != v_array[measurand_index], "cJSON_CreateArray() returned NULL; memory exhausted");
+            cJSON_AddItemToObject(snon_entry, "v", v_array[measurand_index]);
+
+            vt_array = cJSON_CreateArray();
+            ASSERT(NULL != vt_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+            cJSON_AddItemToObject(snon_entry, "vT", vt_array);
+
+            cJSON_AddItemToArray(snon_array[measurand_index], snon_entry);
+
+            measurand_index = measurand_index + 1U;
+        }
+
+        signal_action.sa_handler = signal_handler;
+        signal_action.sa_flags = SA_RESTART;
+        sigemptyset(&signal_action.sa_mask);
+
+        if(C_FAILURE == sigaction(SIGINT, &signal_action, &old_signal_action))
+        {
+            fprintf(stderr, "Error setting up signal handler\n");
+            perror("sigaction");
+            return_status = C_FAILURE;
+        }
+
+        while(true == should_poll)
+        {
+            if(true == g_abort_collect)
+            {
+                should_poll = false;
+            }
+            else
+            {
+                clock_gettime(CLOCK_MONOTONIC, &poll_start);
+                iso8601_time(timestamp, sizeof(timestamp));
+
+                // On the first poll, record the timestamp; it becomes the value
+                // filename (Section 8.6) and remains stable for the whole session.
+                if(true == first_poll)
+                {
+                    strncpy(first_timestamp, timestamp, sizeof(first_timestamp) - 1U);
+                    first_timestamp[sizeof(first_timestamp) - 1U] = '\0';
+                    first_poll = false;
+                }
+
+                // Single HTTP GET retrieves both PowerWatts.Reading and EnergykWh.Reading.
+                // On connection loss, rfpdu_read_measurements reconnects and retries once.
+                if(C_FAILURE == rfpdu_read_measurements(conn, &readings[C_MEASURAND_WATTS], &readings[C_MEASURAND_KWH]))
+                {
+                    if(false == g_abort_collect)
+                    {
+                        // Genuine read failure, not a signal interruption.
+                        fprintf(stderr, "rfpdu_collect_values: read failed; stopping collection\n");
+                        return_status = C_FAILURE;
+                    }                }
+                else
+                {
+                    measurand_index = 0U;
+                    while(measurand_index < C_MEASURAND_COUNT)
+                    {
+                        // ASDFG-C 6.23 VIOLATION: readings[] entries are double; formatted as a
+                        // string to match the SNON v array convention used throughout this codebase
+                        snprintf(num_str, sizeof(num_str), "%g", readings[measurand_index]);
+                        cJSON_AddItemToArray(v_array[measurand_index], cJSON_CreateString(num_str));
+
+                        vt_array = cJSON_GetObjectItem(cJSON_GetArrayItem(snon_array[measurand_index], 0), "vT");
+                        cJSON_AddItemToArray(vt_array, cJSON_CreateString(timestamp));
+
+                        measurand_index = measurand_index + 1U;
+                    }
+
+                    clock_gettime(CLOCK_MONOTONIC, &poll_end);
+
+                    poll_start_nsec = (int64_from_time(poll_start.tv_sec) * C_NS_PER_SECOND) + int64_from_time(poll_start.tv_nsec);
+                    poll_end_nsec   = (int64_from_time(poll_end.tv_sec)   * C_NS_PER_SECOND) + int64_from_time(poll_end.tv_nsec);
+
+                    remaining_ns = C_POLL_INTERVAL_NS - (poll_end_nsec - poll_start_nsec);
+
+                    if(0 < remaining_ns)
+                    {
+                        sleep_duration.tv_sec = time_from_int64(remaining_ns / C_NS_PER_SECOND);
+                        sleep_duration.tv_nsec = (long) (remaining_ns % C_NS_PER_SECOND);
+                        nanosleep(&sleep_duration, NULL);
+                    }
+                }
+            }
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            if(C_FAILURE == sigaction(SIGINT, &old_signal_action, NULL))
+            {
+                fprintf(stderr, "Error unregistering signal handler\n");
+                perror("sigaction");
+                return_status = C_FAILURE;
+            }
+        }
+
+        // Write out all accumulated readings as one value file per measurand,
+        // provided at least one reading was captured. Files are written even
+        // when a later poll error set return_status, so partial session data
+        // is preserved; a write failure for one measurand does not prevent
+        // the remaining measurands from being written.
+        if(false == first_poll)
+        {
+            measurand_index = 0U;
+            while(measurand_index < C_MEASURAND_COUNT)
+            {
+                // Value filename: ISO 8601 start timestamp with ':' replaced by '-',
+                // written under this measurand's series values directory (Section 8.6).
+                snprintf(snon_dpath, sizeof(snon_dpath), "%sseries/%s/values/%s.json",
+                         snon_path, series_set->uuid[measurand_index], first_timestamp);
+                string_replace_char(snon_dpath, ':', '-');
+
+                snon_output = cJSON_PrintUnformatted(snon_array[measurand_index]);
+                ASSERT(NULL != snon_output, "Memory allocation failed serialising SNON array for series %s", series_set->uuid[measurand_index]);
+
+                snon_fd = int32_from_int(open(snon_dpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+
+                if(C_FAILURE == snon_fd)
+                {
+                    fprintf(stderr, "Error creating SNON value record file: %s\n", snon_dpath);
+                    perror("open");
+                    return_status = C_FAILURE;
+                }
+                else
+                {
+                    data_len = strlen(snon_output);
+                    data_written_len = write(snon_fd, snon_output, data_len);
+
+                    // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with data_len; safe because data_written_len is checked for < 0 first
+                    if((data_written_len < 0) || ((size_t) data_written_len != data_len))
+                    {
+                        fprintf(stderr, "Error writing SNON value record for series %s\n", series_set->uuid[measurand_index]);
+                        perror("write");
+                        return_status = C_FAILURE;
+                    }
+
+                    close(snon_fd);
+                }
+
+                cJSON_free(snon_output);
+
+                measurand_index = measurand_index + 1U;
+            }
+        }
+
+        measurand_index = 0U;
+        while(measurand_index < C_MEASURAND_COUNT)
+        {
+            cJSON_Delete(snon_array[measurand_index]);
+            measurand_index = measurand_index + 1U;
+        }
+
+        return(return_status);
+    }
+
+/*
+## Validate and initialise the SNON root directory
+
+Checks that snon_path ends with '/', creates the root directory if it does not yet exist, verifies it is accessible with `mode`, and creates each of the five required entity class subdirectories (`devices/`, `locations/`, `measurands/`, `sensors/`, `series/`) if they are missing. EEXIST on any mkdir call is treated as success so the function is idempotent.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                                            |
+| ------------ | --------- | ----------- | ---------------------------------------------------------------------- |
+| snon_path    | in        | const char* | SNON root path. Must end with '/'.                                     |
+| mode         | in        | int32_t     | access(2) mode flags to verify on the root directory (e.g. R_OK|W_OK).|
+| return value | out       | int32_t     | C_SUCCESS on success; C_FAILURE if the path is invalid or inaccessible.|
+
+Other changes to system state include:
+
+- Creates snon_path and up to five subdirectories via mkdir.
+
+*/
+
+    int32_t snon_validate_dir(const char* snon_path, int32_t mode)
+    {
+        int32_t             return_status = C_SUCCESS;
+        char                sub_path[PATH_MAX] = {0};
+        int32_t             path_len = 0;
+        int32_t             index = 0;
+        const char*         subdirs[] = { "devices", "locations", "measurands", "sensors", "series", NULL };
+
+        REQUIRES(NULL != snon_path, "NULL pointer passed for snon_path");
+
+        if('/' != snon_path[strlen(snon_path) - 1])
+        {
+            fprintf(stderr, "Specified SNON directory does not end with a '/': %s\n", snon_path);
+            return_status = C_FAILURE;
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            if(C_FAILURE == mkdir(snon_path, 0755))
+            {
+                if(EEXIST != errno)
+                {
+                    fprintf(stderr, "Error creating SNON root directory: %s\n", snon_path);
+                    perror(snon_path);
+                    return_status = C_FAILURE;
+                }
+            }
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            return_status = access(snon_path, mode);
+            if(C_FAILURE == return_status)
+            {
+                fprintf(stderr, "Error accessing specified SNON directory: %s\n", snon_path);
+                perror(snon_path);
+            }
+        }
+
+        while((NULL != subdirs[index]) && (C_SUCCESS == return_status))
+        {
+            path_len = snprintf(sub_path, sizeof(sub_path), "%s%s", snon_path, subdirs[index]);
+            if(path_len >= (int32_t)sizeof(sub_path))
+            {
+                fprintf(stderr, "SNON subdirectory path too long: %s%s\n", snon_path, subdirs[index]);
+                return_status = C_FAILURE;
+            }
+
+            if(C_SUCCESS == return_status)
+            {
+                if(C_FAILURE == mkdir(sub_path, 0755))
+                {
+                    if(EEXIST != errno)
+                    {
+                        fprintf(stderr, "Error creating SNON entity class directory: %s\n", sub_path);
+                        perror(sub_path);
+                        return_status = C_FAILURE;
+                    }
+                }
+            }
+
+            index = index + 1;
+        }
+
+        return(return_status);
+    }
+
+/*
+## rfpdu_create_snon_definitions
+
+Creates SNON 4.0 filesystem artefacts for the RedFish PDU device, then resolves the measurand/sensor/series chain for each of the two tracked quantities (wattage and cumulative energy) via `rfpdu_create_measurand_chain`. Returns the two new series UUIDs via `series_set_out` for use by `rfpdu_collect_values`.
+
+The following artefacts are produced under `snon_path`:
+
+1. `devices/<device_uuid>.json` — device fragment. Skipped without error if already exists (Section 8.11).
+2. `devices/<device_uuid>/`, `devices/<device_uuid>/devices/`, `devices/<device_uuid>/sensors/` — device subdirectories (idempotent).
+3. For each of the C_MEASURAND_COUNT tracked quantities, the measurand/sensor/series chain described in `rfpdu_create_measurand_chain`.
+
+### Interactions
+
+| Parameter      | Direction | Type                  | Description                                                              |
+| -------------- | --------- | --------------------- | ------------------------------------------------------------------------ |
+| snon_path      | in        | const char*           | SNON root path. Must not be NULL. Must end with '/'.                     |
+| device_uuid    | in        | const char*           | UUID string identifying the device. Must not be NULL.                    |
+| series_set_out | out       | rfpdu_series_set_t*   | Receives the newly created series UUID for each tracked measurand.       |
+| return value   | out       | int32_t               | C_SUCCESS on success; C_FAILURE on any I/O or allocation error.          |
+
+*/
+
+    int32_t rfpdu_create_snon_definitions(const char* snon_path, const char* device_uuid, rfpdu_series_set_t* series_set_out)
+    {
+        char        snon_fpath[PATH_MAX] = {0};
+        char        snon_dpath[PATH_MAX] = {0};
+        int32_t     snon_fd = C_FAILURE;
+        cJSON*      snon_root = NULL;
+        cJSON*      entity_obj = NULL;
+        char        working_string[1024] = {0};
+        char*       snon_output = NULL;
+        size_t      output_len = 0U;
+        ssize_t     bytes_written = 0;
+        uint32_t    measurand_index = 0U;
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != snon_path, "snon_path is NULL");
+        REQUIRES(NULL != device_uuid, "device_uuid is NULL");
+        REQUIRES(is_valid_uuid(device_uuid), "device_uuid is not a valid UUID");
+        REQUIRES(NULL != series_set_out, "series_set_out is NULL");
+
+        // Device canonical fragment file (Section 8.5).
+        snprintf(snon_fpath, sizeof(snon_fpath), "%sdevices/%s.json", snon_path, device_uuid);
+        snon_fd = int32_from_int(open(snon_fpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+
+        if(C_FAILURE == snon_fd)
+        {
+            if(EEXIST != errno)
+            {
+                fprintf(stderr, "Error creating SNON device record file: %s\n", snon_fpath);
+                perror("open");
+                return_status = C_FAILURE;
+            }
+        }
+
+        if((C_SUCCESS == return_status) && (C_FAILURE != snon_fd))
+        {
+            snon_root = cJSON_CreateArray();
+            ASSERT(NULL != snon_root, "cJSON_CreateArray() returned NULL; memory exhausted");
+
+            entity_obj = cJSON_CreateObject();
+            ASSERT(NULL != entity_obj, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+            snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
+            cJSON_AddItemToObjectCS(entity_obj, "eID", cJSON_CreateString(working_string));
+            cJSON_AddItemToObjectCS(entity_obj, "eC",  cJSON_CreateString("device"));
+            snon_addname(entity_obj, "eN", "*", "RedFish PDU");
+            cJSON_AddItemToArray(snon_root, entity_obj);
+
+            snon_output = cJSON_PrintUnformatted(snon_root);
+            ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
+
+            output_len = strlen(snon_output);
+            bytes_written = write(snon_fd, snon_output, output_len);
+
+            // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with output_len, safe because bytes_written is checked for < 0 first
+            if((bytes_written < 0) || ((size_t)bytes_written != output_len))
+            {
+                fprintf(stderr, "Error writing SNON device record\n");
+                perror("write");
+                return_status = C_FAILURE;
+            }
+
+            cJSON_free(snon_output);
+            cJSON_Delete(snon_root);
+            close(snon_fd);
+            snon_fd = C_FAILURE;
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sdevices/%s", snon_path, device_uuid);
+            return_status = rfpdu_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sdevices/%s/devices", snon_path, device_uuid);
+            return_status = rfpdu_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sdevices/%s/sensors", snon_path, device_uuid);
+            return_status = rfpdu_make_dir_if_missing(snon_dpath);
+        }
+
+        // Resolve the measurand/sensor/series chain for each tracked quantity.
+        measurand_index = 0U;
+        while((C_SUCCESS == return_status) && (measurand_index < C_MEASURAND_COUNT))
+        {
+            return_status = rfpdu_create_measurand_chain(snon_path, device_uuid,
+                                                          g_measurand_defs[measurand_index].name,
+                                                          g_measurand_defs[measurand_index].unit,
+                                                          series_set_out->uuid[measurand_index]);
+            measurand_index = measurand_index + 1U;
+        }
+
+        return(return_status);
+    }
+
+/*
+## rfpdu_create_measurand_chain
+
+Ensures the measurand, sensor, and series entities for a single PDU measurement quantity exist under `snon_path`, creating a new series for this session. Used by `rfpdu_create_snon_definitions` once per tracked measurand (Section 8.9).
+
+### Interactions
+
+| Parameter       | Direction | Type        | Description                                                              |
+| --------------- | --------- | ----------- | ------------------------------------------------------------------------ |
+| snon_path       | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.                     |
+| device_uuid     | in        | const char* | UUID string identifying the parent device. Must not be NULL.             |
+| measurand_name  | in        | const char* | Human-readable name shared by the measurand, sensor, and series.         |
+| measurand_unit  | in        | const char* | SNON `meU` unit string for the measurand (e.g. "W", "kWh").             |
+| series_uuid_out | out       | char*       | Receives the newly created series UUID. Buffer must be C_UUID_LEN bytes. |
+| return value    | out       | int32_t     | C_SUCCESS on success; C_FAILURE on any I/O or allocation error.          |
+
+Other changes to system state include:
+
+- Creates `measurands/<uuid>.json` if no matching measurand exists (Section 8.10).
+- Creates `sensors/<uuid>.json` and its subdirectories if no matching sensor exists for this device/measurand pair.
+- Creates a new `series/<uuid>.json` and `series/<uuid>/values/` only on the first run; on subsequent runs the existing series is reused and only `series/<uuid>/values/` is ensured to exist.
+- Creates relative symlink pairs linking the device to the sensor and the sensor to the series (Section 8.7).
+
+*/
+
+    int32_t rfpdu_create_measurand_chain(const char* snon_path, const char* device_uuid, const char* measurand_name, const char* measurand_unit, char* series_uuid_out)
+    {
+        char        snon_fpath[PATH_MAX] = {0};
+        char        snon_dpath[PATH_MAX] = {0};
+        char        link_dir[PATH_MAX] = {0};
+        char        rel_file_target[PATH_MAX] = {0};
+        char        rel_dir_target[PATH_MAX] = {0};
+        int32_t     snon_fd = C_FAILURE;
+        cJSON*      snon_root = NULL;
+        cJSON*      entity_obj = NULL;
+        cJSON*      relation_object = NULL;
+        cJSON*      relation_array = NULL;
+        char        sensor_uuid[C_UUID_LEN] = {0};
+        char        series_uuid[C_UUID_LEN] = {0};
+        char        measurand_uuid[C_UUID_LEN] = {0};
+        char        working_string[1024] = {0};
+        char*       snon_output = NULL;
+        size_t      output_len = 0U;
+        ssize_t     bytes_written = 0;
+        bool        series_is_new = false;
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != snon_path, "snon_path is NULL");
+        REQUIRES(NULL != device_uuid, "device_uuid is NULL");
+        REQUIRES(NULL != measurand_name, "measurand_name is NULL");
+        REQUIRES(NULL != measurand_unit, "measurand_unit is NULL");
+        REQUIRES(NULL != series_uuid_out, "series_uuid_out is NULL");
+
+        // Resolve the shared measurand for both the sensor and the series.
+        return_status = rfpdu_ensure_measurand(snon_path, measurand_name, measurand_unit, measurand_uuid);
+
+        // Sensor: find the existing sensor for this device/measurand pair, or create one.
+        if(C_SUCCESS == return_status)
+        {
+            if(C_FAILURE == rfpdu_find_sensor_uuid(snon_path, device_uuid, measurand_uuid, sensor_uuid))
+            {
+                if(C_FAILURE == generate_random_uuid(sensor_uuid))
+                {
+                    fprintf(stderr, "Error generating random UUID for sensor '%s'\n", measurand_name);
+                    return_status = C_FAILURE;
+                }
+
+                if(C_SUCCESS == return_status)
+                {
+                    snprintf(snon_fpath, sizeof(snon_fpath), "%ssensors/%s.json", snon_path, sensor_uuid);
+                    snon_fd = int32_from_int(open(snon_fpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+                    if(C_FAILURE == snon_fd)
+                    {
+                        fprintf(stderr, "Error creating SNON sensor record file: %s\n", snon_fpath);
+                        perror("open");
+                        return_status = C_FAILURE;
+                    }
+                }
+
+                if(C_SUCCESS == return_status)
+                {
+                    snon_root = cJSON_CreateArray();
+                    ASSERT(NULL != snon_root, "cJSON_CreateArray() returned NULL; memory exhausted");
+
+                    entity_obj = cJSON_CreateObject();
+                    ASSERT(NULL != entity_obj, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+                    snprintf(working_string, sizeof(working_string), "urn:uuid:%s", sensor_uuid);
+                    cJSON_AddItemToObjectCS(entity_obj, "eID", cJSON_CreateString(working_string));
+                    cJSON_AddItemToObjectCS(entity_obj, "eC",  cJSON_CreateString("sensor"));
+                    snon_addname(entity_obj, "eN", "*", measurand_name);
+
+                    relation_object = cJSON_CreateObject();
+                    ASSERT(NULL != relation_object, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+                    relation_array = cJSON_CreateArray();
+                    ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+                    snprintf(working_string, sizeof(working_string), "urn:uuid:%s", device_uuid);
+                    cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+                    cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
+
+                    relation_array = cJSON_CreateArray();
+                    ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+                    snprintf(working_string, sizeof(working_string), "urn:uuid:%s", measurand_uuid);
+                    cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+                    cJSON_AddItemToObjectCS(relation_object, "measurand", relation_array);
+
+                    cJSON_AddItemToObjectCS(entity_obj, "eR", relation_object);
+                    cJSON_AddItemToArray(snon_root, entity_obj);
+
+                    snon_output = cJSON_PrintUnformatted(snon_root);
+                    ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
+
+                    output_len = strlen(snon_output);
+                    bytes_written = write(snon_fd, snon_output, output_len);
+
+                    // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with output_len, safe because bytes_written is checked for < 0 first
+                    if((bytes_written < 0) || ((size_t)bytes_written != output_len))
+                    {
+                        fprintf(stderr, "Error writing SNON sensor record\n");
+                        perror("write");
+                        return_status = C_FAILURE;
+                    }
+
+                    cJSON_free(snon_output);
+                    cJSON_Delete(snon_root);
+                    close(snon_fd);
+                    snon_fd = C_FAILURE;
+                }
+            }
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%ssensors/%s", snon_path, sensor_uuid);
+            return_status = rfpdu_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%ssensors/%s/values", snon_path, sensor_uuid);
+            return_status = rfpdu_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%ssensors/%s/series", snon_path, sensor_uuid);
+            return_status = rfpdu_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(link_dir, sizeof(link_dir), "%sdevices/%s/sensors/", snon_path, device_uuid);
+            snprintf(rel_file_target, sizeof(rel_file_target), "../../../sensors/%s.json", sensor_uuid);
+            snprintf(rel_dir_target,  sizeof(rel_dir_target),  "../../../sensors/%s",      sensor_uuid);
+            return_status = rfpdu_create_symlink_pair(link_dir, sensor_uuid, rel_file_target, rel_dir_target);
+        }
+
+        // Series: reuse the existing series for this sensor/measurand pair if one
+        // exists, so that value fragments accumulate in one series across daemon
+        // restarts (per SNON Section 1.5 — a series has zero or more value fragments).
+        // The PDU's measurements are continuous across restarts, making a single
+        // long-lived series the correct model. A new series is created only on the
+        // first run when none yet exists.
+        if(C_SUCCESS == return_status)
+        {
+            if(C_FAILURE == rfpdu_find_series_uuid(snon_path, sensor_uuid, measurand_uuid, series_uuid))
+            {
+                // No existing series found; create a new one.
+                series_is_new = true;
+                if(C_FAILURE == generate_random_uuid(series_uuid))
+                {
+                    fprintf(stderr, "Error generating random UUID for series '%s'\n", measurand_name);
+                    return_status = C_FAILURE;
+                }
+            }
+        }
+
+        // Write the series fragment file only when creating a new series.
+        if((C_SUCCESS == return_status) && (true == series_is_new))
+        {
+            snprintf(snon_fpath, sizeof(snon_fpath), "%sseries/%s.json", snon_path, series_uuid);
+            snon_fd = int32_from_int(open(snon_fpath, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+            if(C_FAILURE == snon_fd)
+            {
+                fprintf(stderr, "Error creating SNON series record file: %s\n", snon_fpath);
+                perror("open");
+                return_status = C_FAILURE;
+            }
+
+            if(C_SUCCESS == return_status)
+            {
+                snon_root = cJSON_CreateArray();
+                ASSERT(NULL != snon_root, "cJSON_CreateArray() returned NULL; memory exhausted");
+
+                entity_obj = cJSON_CreateObject();
+                ASSERT(NULL != entity_obj, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+                snprintf(working_string, sizeof(working_string), "urn:uuid:%s", series_uuid);
+                cJSON_AddItemToObjectCS(entity_obj, "eID", cJSON_CreateString(working_string));
+                cJSON_AddItemToObjectCS(entity_obj, "eC",  cJSON_CreateString(C_SNON_SERIES_CLASS));
+                snon_addname(entity_obj, "eN", "*", measurand_name);
+
+                relation_object = cJSON_CreateObject();
+                ASSERT(NULL != relation_object, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+                relation_array = cJSON_CreateArray();
+                ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+                snprintf(working_string, sizeof(working_string), "urn:uuid:%s", sensor_uuid);
+                cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+                cJSON_AddItemToObjectCS(relation_object, "child_of", relation_array);
+
+                relation_array = cJSON_CreateArray();
+                ASSERT(NULL != relation_array, "cJSON_CreateArray() returned NULL; memory exhausted");
+                snprintf(working_string, sizeof(working_string), "urn:uuid:%s", measurand_uuid);
+                cJSON_AddItemToArray(relation_array, cJSON_CreateString(working_string));
+                cJSON_AddItemToObjectCS(relation_object, "measurand", relation_array);
+
+                cJSON_AddItemToObjectCS(entity_obj, "eR", relation_object);
+                cJSON_AddItemToArray(snon_root, entity_obj);
+
+                snon_output = cJSON_PrintUnformatted(snon_root);
+                ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
+
+                output_len = strlen(snon_output);
+                bytes_written = write(snon_fd, snon_output, output_len);
+
+                // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t to compare with output_len, safe because bytes_written is checked for < 0 first
+                if((bytes_written < 0) || ((size_t)bytes_written != output_len))
+                {
+                    fprintf(stderr, "Error writing SNON series record\n");
+                    perror("write");
+                    return_status = C_FAILURE;
+                }
+
+                cJSON_free(snon_output);
+                cJSON_Delete(snon_root);
+                close(snon_fd);
+                snon_fd = C_FAILURE;
+            }
+        }
+
+        // Ensure series directories exist. These calls are idempotent (EEXIST is
+        // success), so they run unconditionally whether the series is new or reused.
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sseries/%s", snon_path, series_uuid);
+            return_status = rfpdu_make_dir_if_missing(snon_dpath);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(snon_dpath, sizeof(snon_dpath), "%sseries/%s/values", snon_path, series_uuid);
+            return_status = rfpdu_make_dir_if_missing(snon_dpath);
+        }
+
+        // Symlink pair in sensors/<sensor_uuid>/series/. Idempotent (EEXIST is success).
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(link_dir, sizeof(link_dir), "%ssensors/%s/series/", snon_path, sensor_uuid);
+            snprintf(rel_file_target, sizeof(rel_file_target), "../../../series/%s.json", series_uuid);
+            snprintf(rel_dir_target,  sizeof(rel_dir_target),  "../../../series/%s",      series_uuid);
+            return_status = rfpdu_create_symlink_pair(link_dir, series_uuid, rel_file_target, rel_dir_target);
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            strncpy(series_uuid_out, series_uuid, C_UUID_LEN - 1U);
+            series_uuid_out[C_UUID_LEN - 1U] = '\0';
+        }
+
+        return(return_status);
+    }
+
+/*
+## rfpdu_ensure_measurand
+
+Searches `snon_path/measurands/` for an existing fragment whose `eN["*"]` matches `measurand_name`, and writes the found UUID to `measurand_uuid_out`. If no match is found, creates a new immutable measurand fragment file using `measurand_unit` as its `meU` value and writes the new UUID instead.
+
+Per Section 8.10, measurand files SHALL NOT be modified once written. O_EXCL is used when creating a new file, and existing files are never updated.
+
+### Interactions
+
+| Parameter          | Direction | Type        | Description                                                       |
+| ------------------ | --------- | ----------- | ------------------------------------------------------------------|
+| snon_path          | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.              |
+| measurand_name     | in        | const char* | Name to find or create a measurand for. Must not be NULL.         |
+| measurand_unit     | in        | const char* | SNON `meU` unit string used only when creating a new measurand.   |
+| measurand_uuid_out | out       | char*       | Receives the UUID of the found or created measurand.              |
+| return value       | out       | int32_t     | C_SUCCESS on success; C_FAILURE on any I/O or allocation error.   |
+
+Other changes to system state include:
+
+- Creates `snon_path/measurands/<new_uuid>.json` when no matching measurand is found.
+
+*/
+
+    int32_t rfpdu_ensure_measurand(const char* snon_path, const char* measurand_name, const char* measurand_unit, char* measurand_uuid_out)
+    {
+        char            measurands_dir[PATH_MAX] = {0};
+        char            candidate_path[PATH_MAX + 1024] = {0};
+        char            new_file_path[PATH_MAX + 1024] = {0};
+        char            new_uuid[C_UUID_LEN] = {0};
+        char            working_string[1024] = {0};
+        DIR*            dir_handle = NULL;
+        struct dirent*  dir_entry = NULL;
+        struct stat     stat_buf;
+        int32_t         file_fd = C_FAILURE;
+        ssize_t         bytes_read = 0;
+        char*           file_contents = NULL;
+        cJSON*          fragment_array = NULL;
+        cJSON*          fragment = NULL;
+        cJSON*          eid_item = NULL;
+        cJSON*          en_item = NULL;
+        cJSON*          en_wildcard = NULL;
+        cJSON*          snon_root = NULL;
+        cJSON*          measurand_obj = NULL;
+        char*           snon_output = NULL;
+        size_t          output_len = 0U;
+        ssize_t         bytes_written = 0;
+        size_t          entry_len = 0U;
+        bool            found = false;
+        bool            scan_done = false;
+        int32_t         return_status = C_SUCCESS;
+
+        REQUIRES(NULL != snon_path, "snon_path is NULL");
+        REQUIRES(NULL != measurand_name, "measurand_name is NULL");
+        REQUIRES(NULL != measurand_unit, "measurand_unit is NULL");
+        REQUIRES(NULL != measurand_uuid_out, "measurand_uuid_out is NULL");
+
+        snprintf(measurands_dir, sizeof(measurands_dir), "%smeasurands/", snon_path);
+
+        dir_handle = opendir(measurands_dir);
+        if(NULL == dir_handle)
+        {
+            if(ENOENT != errno)
+            {
+                fprintf(stderr, "Error opening measurands directory: %s\n", measurands_dir);
+                perror("opendir");
+                return_status = C_FAILURE;
+            }
+        }
+
+        if((C_SUCCESS == return_status) && (NULL != dir_handle))
+        {
+            while(false == scan_done)
+            {
+                dir_entry = readdir(dir_handle);
+                if(NULL == dir_entry)
+                {
+                    scan_done = true;
+                }
+                else
+                {
+                    entry_len = strlen(dir_entry->d_name);
+                    if((entry_len > C_JSON_EXT_LEN) && (0 == strcmp(dir_entry->d_name + entry_len - C_JSON_EXT_LEN, C_JSON_EXT)))
+                    {
+                        snprintf(candidate_path, sizeof(candidate_path), "%s%s", measurands_dir, dir_entry->d_name);
+                        file_fd = int32_from_int(open(candidate_path, O_RDONLY));
+                        if(C_FAILURE != file_fd)
+                        {
+                            if(C_SUCCESS == fstat(file_fd, &stat_buf))
+                            {
+                                file_contents = (char*)malloc((size_t)stat_buf.st_size + 1U);
+                                if(NULL != file_contents)
+                                {
+                                    bytes_read = read(file_fd, file_contents, (size_t)stat_buf.st_size);
+                                    if(bytes_read == (ssize_t)stat_buf.st_size)
+                                    {
+                                        file_contents[stat_buf.st_size] = '\0';
+                                        fragment_array = cJSON_Parse(file_contents);
+                                        if(NULL != fragment_array)
+                                        {
+                                            fragment = cJSON_GetArrayItem(fragment_array, 0);
+                                            if(NULL != fragment)
+                                            {
+                                                en_item = cJSON_GetObjectItem(fragment, "eN");
+                                                if(NULL != en_item)
+                                                {
+                                                    en_wildcard = cJSON_GetObjectItem(en_item, "*");
+                                                    if((NULL != en_wildcard) && cJSON_IsString(en_wildcard) && (0 == strcmp(en_wildcard->valuestring, measurand_name)))
+                                                    {
+                                                        eid_item = cJSON_GetObjectItem(fragment, "eID");
+                                                        if((NULL != eid_item) && cJSON_IsString(eid_item) && (0 == strncmp(eid_item->valuestring, "urn:uuid:", C_URN_UUID_PREFIX_LEN)))
+                                                        {
+                                                            strncpy(measurand_uuid_out, eid_item->valuestring + C_URN_UUID_PREFIX_LEN, C_UUID_LEN - 1U);
+                                                            measurand_uuid_out[C_UUID_LEN - 1U] = '\0';
+                                                            found = true;
+                                                            scan_done = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            cJSON_Delete(fragment_array);
+                                            fragment_array = NULL;
+                                        }
+                                    }
+                                    free(file_contents);
+                                    file_contents = NULL;
+                                }
+                            }
+                            close(file_fd);
+                            file_fd = C_FAILURE;
+                        }
+                    }
+                }
+            }
+            closedir(dir_handle);
+        }
+
+        if((C_SUCCESS == return_status) && (false == found))
+        {
+            if(C_FAILURE == generate_random_uuid(new_uuid))
+            {
+                fprintf(stderr, "Error generating UUID for measurand '%s'\n", measurand_name);
+                return_status = C_FAILURE;
+            }
+
+            if(C_SUCCESS == return_status)
+            {
+                snprintf(new_file_path, sizeof(new_file_path), "%s%s.json", measurands_dir, new_uuid);
+                file_fd = int32_from_int(open(new_file_path, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR));
+                if(C_FAILURE == file_fd)
+                {
+                    fprintf(stderr, "Error creating measurand file: %s\n", new_file_path);
+                    perror("open");
+                    return_status = C_FAILURE;
+                }
+            }
+
+            if(C_SUCCESS == return_status)
+            {
+                snon_root = cJSON_CreateArray();
+                ASSERT(NULL != snon_root, "cJSON_CreateArray() returned NULL; memory exhausted");
+
+                measurand_obj = cJSON_CreateObject();
+                ASSERT(NULL != measurand_obj, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+                snprintf(working_string, sizeof(working_string), "urn:uuid:%s", new_uuid);
+                cJSON_AddItemToObjectCS(measurand_obj, "eID", cJSON_CreateString(working_string));
+                cJSON_AddItemToObjectCS(measurand_obj, "eC",  cJSON_CreateString("measurand"));
+                cJSON_AddItemToObjectCS(measurand_obj, "meU", cJSON_CreateString(measurand_unit));
+                cJSON_AddItemToObjectCS(measurand_obj, "meT", cJSON_CreateString("numeric"));
+                snon_addname(measurand_obj, "eN", "*", measurand_name);
+                cJSON_AddItemToArray(snon_root, measurand_obj);
+
+                snon_output = cJSON_PrintUnformatted(snon_root);
+                ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
+
+                output_len = strlen(snon_output);
+                bytes_written = write(file_fd, snon_output, output_len);
+
+                // ASDFG-C 6.35 VIOLATION: ssize_t cast to size_t, safe because bytes_written is checked for < 0 first
+                if((bytes_written < 0) || ((size_t)bytes_written != output_len))
+                {
+                    fprintf(stderr, "Error writing measurand record: %s\n", new_file_path);
+                    perror("write");
+                    return_status = C_FAILURE;
+                }
+
+                cJSON_free(snon_output);
+                cJSON_Delete(snon_root);
+                close(file_fd);
+            }
+
+            if(C_SUCCESS == return_status)
+            {
+                strncpy(measurand_uuid_out, new_uuid, C_UUID_LEN - 1U);
+                measurand_uuid_out[C_UUID_LEN - 1U] = '\0';
+            }
+        }
+
+        return(return_status);
+    }
+
+/*
+## rfpdu_find_sensor_uuid
+
+Scans `snon_path/sensors/` for a canonical sensor fragment whose `eR.child_of` array contains `urn:uuid:<device_uuid>` and whose `eR.measurand` array contains `urn:uuid:<measurand_uuid>`. On success, writes the sensor's bare UUID to `sensor_uuid_out`.
+
+Matching on both parent device and measurand allows a single device to have one sensor per tracked measurand (Section 8.9).
+
+### Interactions
+
+| Parameter       | Direction | Type        | Description                                                              |
+| --------------- | --------- | ----------- | ------------------------------------------------------------------------ |
+| snon_path       | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.                     |
+| device_uuid     | in        | const char* | Bare UUID of the parent device to match against eR.child_of.             |
+| measurand_uuid  | in        | const char* | Bare UUID of the measurand to match against eR.measurand.                |
+| sensor_uuid_out | out       | char*       | Receives the bare UUID of the matching sensor. Not written on failure.   |
+| return value    | out       | int32_t     | C_SUCCESS if found; C_FAILURE if not found or on any I/O error.          |
+
+*/
+
+    int32_t rfpdu_find_sensor_uuid(const char* snon_path, const char* device_uuid, const char* measurand_uuid, char* sensor_uuid_out)
+    {
+        char            sensors_dir[PATH_MAX] = {0};
+        char            candidate_path[PATH_MAX + 1024] = {0};
+        char            device_urn[C_SNON_EID_LEN] = {0};
+        char            measurand_urn[C_SNON_EID_LEN] = {0};
+        DIR*            dir_handle = NULL;
+        struct dirent*  dir_entry = NULL;
+        struct stat     stat_buf;
+        int32_t         file_fd = C_FAILURE;
+        ssize_t         bytes_read = 0;
+        char*           file_contents = NULL;
+        cJSON*          fragment_array = NULL;
+        cJSON*          fragment = NULL;
+        cJSON*          eid_item = NULL;
+        cJSON*          er_item = NULL;
+        cJSON*          child_of_array = NULL;
+        cJSON*          child_of_entry = NULL;
+        cJSON*          measurand_array = NULL;
+        cJSON*          measurand_entry = NULL;
+        size_t          entry_len = 0U;
+        bool            found = false;
+        bool            scan_done = false;
+        int32_t         return_status = C_SUCCESS;
+
+        REQUIRES(NULL != snon_path, "snon_path is NULL");
+        REQUIRES(NULL != device_uuid, "device_uuid is NULL");
+        REQUIRES(NULL != measurand_uuid, "measurand_uuid is NULL");
+        REQUIRES(NULL != sensor_uuid_out, "sensor_uuid_out is NULL");
+
+        snprintf(sensors_dir, sizeof(sensors_dir), "%ssensors/", snon_path);
+        snprintf(device_urn, sizeof(device_urn), "urn:uuid:%s", device_uuid);
+        snprintf(measurand_urn, sizeof(measurand_urn), "urn:uuid:%s", measurand_uuid);
+
+        dir_handle = opendir(sensors_dir);
+        if(NULL == dir_handle)
+        {
+            if(ENOENT != errno)
+            {
+                fprintf(stderr, "Error opening sensors directory: %s\n", sensors_dir);
+                perror("opendir");
+            }
+            return_status = C_FAILURE;
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            while(false == scan_done)
+            {
+                dir_entry = readdir(dir_handle);
+                if(NULL == dir_entry)
+                {
+                    scan_done = true;
+                }
+                else
+                {
+                    entry_len = strlen(dir_entry->d_name);
+                    if((entry_len > C_JSON_EXT_LEN) && (0 == strcmp(dir_entry->d_name + entry_len - C_JSON_EXT_LEN, C_JSON_EXT)))
+                    {
+                        snprintf(candidate_path, sizeof(candidate_path), "%s%s", sensors_dir, dir_entry->d_name);
+                        file_fd = int32_from_int(open(candidate_path, O_RDONLY));
+                        if(C_FAILURE != file_fd)
+                        {
+                            if(C_SUCCESS == fstat(file_fd, &stat_buf))
+                            {
+                                file_contents = (char*)malloc((size_t)stat_buf.st_size + 1U);
+                                if(NULL != file_contents)
+                                {
+                                    bytes_read = read(file_fd, file_contents, (size_t)stat_buf.st_size);
+                                    if(bytes_read == (ssize_t)stat_buf.st_size)
+                                    {
+                                        file_contents[stat_buf.st_size] = '\0';
+                                        fragment_array = cJSON_Parse(file_contents);
+                                        if(NULL != fragment_array)
+                                        {
+                                            fragment = cJSON_GetArrayItem(fragment_array, 0);
+                                            if(NULL != fragment)
+                                            {
+                                                er_item = cJSON_GetObjectItem(fragment, "eR");
+                                                if(NULL != er_item)
+                                                {
+                                                    child_of_array = cJSON_GetObjectItem(er_item, "child_of");
+                                                    if(NULL != child_of_array)
+                                                    {
+                                                        child_of_entry = cJSON_GetArrayItem(child_of_array, 0);
+                                                        if((NULL != child_of_entry) && cJSON_IsString(child_of_entry) && (0 == strcmp(child_of_entry->valuestring, device_urn)))
+                                                        {
+                                                            measurand_array = cJSON_GetObjectItem(er_item, "measurand");
+                                                            if(NULL != measurand_array)
+                                                            {
+                                                                measurand_entry = cJSON_GetArrayItem(measurand_array, 0);
+                                                                if((NULL != measurand_entry) && cJSON_IsString(measurand_entry) && (0 == strcmp(measurand_entry->valuestring, measurand_urn)))
+                                                                {
+                                                                    eid_item = cJSON_GetObjectItem(fragment, "eID");
+                                                                    if((NULL != eid_item) && cJSON_IsString(eid_item) && (0 == strncmp(eid_item->valuestring, "urn:uuid:", C_URN_UUID_PREFIX_LEN)))
+                                                                    {
+                                                                        strncpy(sensor_uuid_out, eid_item->valuestring + C_URN_UUID_PREFIX_LEN, C_UUID_LEN - 1U);
+                                                                        sensor_uuid_out[C_UUID_LEN - 1U] = '\0';
+                                                                        found = true;
+                                                                        scan_done = true;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            cJSON_Delete(fragment_array);
+                                            fragment_array = NULL;
+                                        }
+                                    }
+                                    free(file_contents);
+                                    file_contents = NULL;
+                                }
+                            }
+                            close(file_fd);
+                            file_fd = C_FAILURE;
+                        }
+                    }
+                }
+            }
+            closedir(dir_handle);
+        }
+
+        if((C_SUCCESS == return_status) && (false == found))
+        {
+            return_status = C_FAILURE;
+        }
+
+        return(return_status);
+    }
+
+/*
+## rfpdu_find_series_uuid
+
+Scans `snon_path/sensors/<sensor_uuid>/series/` for a series fragment whose `eR.child_of` array contains `urn:uuid:<sensor_uuid>` and whose `eR.measurand` array contains `urn:uuid:<measurand_uuid>`. The entries in that directory are symlinks created by `rfpdu_create_symlink_pair`; `open()` follows them to their targets in `series/`. On success, writes the series's bare UUID to `series_uuid_out`.
+
+Scanning the sensor-specific `series/` subdirectory rather than the top-level `series/` directory limits the search to series that are already linked to this sensor, making the lookup efficient regardless of how many series exist in the tree overall.
+
+Returns C_SUCCESS if a matching series is found, C_FAILURE if none exists or if any I/O error occurs. ENOENT on the `series/` directory is treated as not-found (C_FAILURE) rather than an error.
+
+### Interactions
+
+| Parameter       | Direction | Type        | Description                                                              |
+| --------------- | --------- | ----------- | ------------------------------------------------------------------------ |
+| snon_path       | in        | const char* | SNON root path. Must not be NULL. Must end with '/'.                     |
+| sensor_uuid     | in        | const char* | Bare UUID of the parent sensor to match against eR.child_of.             |
+| measurand_uuid  | in        | const char* | Bare UUID of the measurand to match against eR.measurand.                |
+| series_uuid_out | out       | char*       | Receives the bare UUID of the matching series. Not written on failure.   |
+| return value    | out       | int32_t     | C_SUCCESS if found; C_FAILURE if not found or on any I/O error.          |
+
+Other changes to system state include:
+
+- Opens and closes each .json symlink in `snon_path/sensors/<sensor_uuid>/series/` until a match is found.
+
+*/
+
+    int32_t rfpdu_find_series_uuid(const char* snon_path, const char* sensor_uuid, const char* measurand_uuid, char* series_uuid_out)
+    {
+        char            series_dir[PATH_MAX] = {0};
+        char            candidate_path[PATH_MAX + 1024] = {0};
+        char            sensor_urn[C_SNON_EID_LEN] = {0};
+        char            measurand_urn[C_SNON_EID_LEN] = {0};
+        DIR*            dir_handle = NULL;
+        struct dirent*  dir_entry = NULL;
+        struct stat     stat_buf;
+        int32_t         file_fd = C_FAILURE;
+        ssize_t         bytes_read = 0;
+        char*           file_contents = NULL;
+        cJSON*          fragment_array = NULL;
+        cJSON*          fragment = NULL;
+        cJSON*          eid_item = NULL;
+        cJSON*          er_item = NULL;
+        cJSON*          child_of_array = NULL;
+        cJSON*          child_of_entry = NULL;
+        cJSON*          measurand_array = NULL;
+        cJSON*          measurand_entry = NULL;
+        size_t          entry_len = 0U;
+        bool            found = false;
+        bool            scan_done = false;
+        int32_t         return_status = C_SUCCESS;
+
+        REQUIRES(NULL != snon_path, "snon_path is NULL");
+        REQUIRES(NULL != sensor_uuid, "sensor_uuid is NULL");
+        REQUIRES(NULL != measurand_uuid, "measurand_uuid is NULL");
+        REQUIRES(NULL != series_uuid_out, "series_uuid_out is NULL");
+
+        snprintf(series_dir, sizeof(series_dir), "%ssensors/%s/series/", snon_path, sensor_uuid);
+        snprintf(sensor_urn, sizeof(sensor_urn), "urn:uuid:%s", sensor_uuid);
+        snprintf(measurand_urn, sizeof(measurand_urn), "urn:uuid:%s", measurand_uuid);
+
+        dir_handle = opendir(series_dir);
+        if(NULL == dir_handle)
+        {
+            // ENOENT means no series have been linked to this sensor yet; return C_FAILURE (not found).
+            if(ENOENT != errno)
+            {
+                fprintf(stderr, "Error opening series directory: %s\n", series_dir);
+                perror("opendir");
+            }
+            return_status = C_FAILURE;
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            while(false == scan_done)
+            {
+                dir_entry = readdir(dir_handle);
+                if(NULL == dir_entry)
+                {
+                    scan_done = true;
+                }
+                else
+                {
+                    entry_len = strlen(dir_entry->d_name);
+
+                    // Only inspect .json symlinks (which point to series/<uuid>.json fragments).
+                    if((entry_len > C_JSON_EXT_LEN) && (0 == strcmp(dir_entry->d_name + entry_len - C_JSON_EXT_LEN, C_JSON_EXT)))
+                    {
+                        snprintf(candidate_path, sizeof(candidate_path), "%s%s", series_dir, dir_entry->d_name);
+
+                        // open() follows the symlink to the target series/<uuid>.json file.
+                        file_fd = int32_from_int(open(candidate_path, O_RDONLY));
+                        if(C_FAILURE != file_fd)
+                        {
+                            if(C_SUCCESS == fstat(file_fd, &stat_buf))
+                            {
+                                file_contents = (char*)malloc((size_t)stat_buf.st_size + 1U);
+                                if(NULL != file_contents)
+                                {
+                                    bytes_read = read(file_fd, file_contents, (size_t)stat_buf.st_size);
+                                    if(bytes_read == (ssize_t)stat_buf.st_size)
+                                    {
+                                        file_contents[stat_buf.st_size] = '\0';
+                                        fragment_array = cJSON_Parse(file_contents);
+                                        if(NULL != fragment_array)
+                                        {
+                                            fragment = cJSON_GetArrayItem(fragment_array, 0);
+                                            if(NULL != fragment)
+                                            {
+                                                er_item = cJSON_GetObjectItem(fragment, "eR");
+                                                if(NULL != er_item)
+                                                {
+                                                    child_of_array = cJSON_GetObjectItem(er_item, "child_of");
+                                                    if(NULL != child_of_array)
+                                                    {
+                                                        child_of_entry = cJSON_GetArrayItem(child_of_array, 0);
+                                                        if((NULL != child_of_entry) && cJSON_IsString(child_of_entry) && (0 == strcmp(child_of_entry->valuestring, sensor_urn)))
+                                                        {
+                                                            measurand_array = cJSON_GetObjectItem(er_item, "measurand");
+                                                            if(NULL != measurand_array)
+                                                            {
+                                                                measurand_entry = cJSON_GetArrayItem(measurand_array, 0);
+                                                                if((NULL != measurand_entry) && cJSON_IsString(measurand_entry) && (0 == strcmp(measurand_entry->valuestring, measurand_urn)))
+                                                                {
+                                                                    eid_item = cJSON_GetObjectItem(fragment, "eID");
+                                                                    if((NULL != eid_item) && cJSON_IsString(eid_item) && (0 == strncmp(eid_item->valuestring, "urn:uuid:", C_URN_UUID_PREFIX_LEN)))
+                                                                    {
+                                                                        strncpy(series_uuid_out, eid_item->valuestring + C_URN_UUID_PREFIX_LEN, C_UUID_LEN - 1U);
+                                                                        series_uuid_out[C_UUID_LEN - 1U] = '\0';
+                                                                        found = true;
+                                                                        scan_done = true;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            cJSON_Delete(fragment_array);
+                                            fragment_array = NULL;
+                                        }
+                                    }
+                                    free(file_contents);
+                                    file_contents = NULL;
+                                }
+                            }
+                            close(file_fd);
+                            file_fd = C_FAILURE;
+                        }
+                    }
+                }
+            }
+            closedir(dir_handle);
+        }
+
+        if((C_SUCCESS == return_status) && (false == found))
+        {
+            return_status = C_FAILURE;
+        }
+
+        return(return_status);
+    }
+
+/*
+## rfpdu_make_dir_if_missing
+
+Creates `path` as a directory if it does not already exist. EEXIST is treated as success so that calls on an already-initialised SNON tree are idempotent.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                           |
+| ------------ | --------- | ----------- | ----------------------------------------------------- |
+| path         | in        | const char* | Directory path to create.                             |
+| return value | out       | int32_t     | C_SUCCESS on success or EEXIST; C_FAILURE otherwise.  |
+
+*/
+
+    int32_t rfpdu_make_dir_if_missing(const char* path)
+    {
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != path, "NULL pointer passed for path");
+
+        if(C_FAILURE == mkdir(path, S_IRWXU))
+        {
+            if(EEXIST != errno)
+            {
+                fprintf(stderr, "Error creating directory: %s\n", path);
+                perror("mkdir");
+                return_status = C_FAILURE;
+            }
+        }
+
+        return(return_status);
+    }
+
+/*
+## rfpdu_create_symlink_pair
+
+Creates two relative symlinks in `link_dir` for the entity identified by `uuid`: a fragment-file symlink (`<uuid>.json`) and a directory symlink (`<uuid>`). EEXIST on either symlink is treated as success so repeated calls are idempotent.
+
+Per Section 8.7, all symlinks SHALL be relative so the tree remains portable.
+
+### Interactions
+
+| Parameter       | Direction | Type        | Description                                                        |
+| --------------- | --------- | ----------- | ------------------------------------------------------------------ |
+| link_dir        | in        | const char* | Directory in which to place both symlinks. Must end with '/'.      |
+| uuid            | in        | const char* | UUID string used as the basename for both symlinks.                |
+| rel_file_target | in        | const char* | Relative target path for the .json file symlink.                   |
+| rel_dir_target  | in        | const char* | Relative target path for the directory symlink.                    |
+| return value    | out       | int32_t     | C_SUCCESS on success or EEXIST; C_FAILURE if any symlink call fails.|
+
+*/
+
+    int32_t rfpdu_create_symlink_pair(const char* link_dir, const char* uuid, const char* rel_file_target, const char* rel_dir_target)
+    {
+        char        link_path[PATH_MAX] = {0};
+        int32_t     return_status = C_SUCCESS;
+
+        REQUIRES(NULL != link_dir, "NULL pointer passed for link_dir");
+        REQUIRES(NULL != uuid, "NULL pointer passed for uuid");
+        REQUIRES(NULL != rel_file_target, "NULL pointer passed for rel_file_target");
+        REQUIRES(NULL != rel_dir_target, "NULL pointer passed for rel_dir_target");
+
+        snprintf(link_path, sizeof(link_path), "%s%s.json", link_dir, uuid);
+        if(C_FAILURE == symlink(rel_file_target, link_path))
+        {
+            if(EEXIST != errno)
+            {
+                fprintf(stderr, "Error creating symlink %s -> %s\n", link_path, rel_file_target);
+                perror("symlink");
+                return_status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == return_status)
+        {
+            snprintf(link_path, sizeof(link_path), "%s%s", link_dir, uuid);
+            if(C_FAILURE == symlink(rel_dir_target, link_path))
+            {
+                if(EEXIST != errno)
+                {
+                    fprintf(stderr, "Error creating symlink %s -> %s\n", link_path, rel_dir_target);
+                    perror("symlink");
+                    return_status = C_FAILURE;
+                }
+            }
+        }
+
+        return(return_status);
+    }
+
+/*
+## Add a localised name entry to a SNON object
+
+Creates a child JSON object containing a single language-keyed string entry and attaches it to the parent SNON object under the given field key.
+
+### Interactions
+
+| Parameter   | Direction | Type   | Description                                                        |
+| ----------- | --------- | ------ | ------------------------------------------------------------------ |
+| snon_object | in/out    | cJSON* | Parent SNON JSON object; the named field is added in place.        |
+| field       | in        | char*  | JSON key under which the name sub-object is inserted (e.g. "eN"). |
+| lang        | in        | char*  | BCP-47 language tag; use "*" as the default.                       |
+| name        | in        | char*  | Human-readable name string.                                        |
+
+*/
+
+    void snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name)
+    {
+        cJSON*  name_object = NULL;
+
+        REQUIRES(NULL != snon_object, "NULL pointer passed for snon_object");
+        REQUIRES(NULL != field, "NULL pointer passed for field");
+        REQUIRES(NULL != lang, "NULL pointer passed for lang");
+        REQUIRES(NULL != name, "NULL pointer passed for name");
+
+        name_object = cJSON_CreateObject();
+        ASSERT(NULL != name_object, "cJSON_CreateObject() returned NULL; memory exhausted");
+
+        cJSON_AddItemToObjectCS(name_object, lang, cJSON_CreateString(name));
+        cJSON_AddItemToObjectCS(snon_object, field, name_object);
+    }
+
+/*
+## string_replace_char
+
+Replaces every occurrence of `find_byte` within a null-terminated string with `replace_byte` in place.
+
+### Interactions
+
+| Parameter    | Direction | Type  | Description                                       |
+| ------------ | --------- | ----- | ------------------------------------------------- |
+| string       | in/out    | char* | Null-terminated string to modify in place.        |
+| find_byte    | in        | char  | Byte value to search for.                         |
+| replace_byte | in        | char  | Byte value to substitute for each occurrence.     |
+
+*/
+
+    void string_replace_char(char* string, char find_byte, char replace_byte)
+    {
+        uint32_t    string_length = 0U;
+        uint32_t    index = 0U;
+
+        REQUIRES(NULL != string, "NULL value passed for string");
+        REQUIRES('\0' != replace_byte, "replace_byte must not be the null terminator");
+
+        string_length = strlen(string);
+
+        while(index < string_length)
+        {
+            if(string[index] == find_byte)
+            {
+                string[index] = replace_byte;
+            }
+
+            index = index + 1U;
+        }
+
+        ENSURES(strlen(string) == string_length, "String length changed unexpectedly: expected %zu, got %zu", string_length, strlen(string));
+    }
+
+/*
+## Send data over a TCP socket
+
+Transmits `data` over `socket_fd`. This is a thin wrapper around `send()` used by the HTTP request functions.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                            |
+| ------------ | --------- | ----------- | ------------------------------------------------------ |
+| socket_fd    | in        | int32_t     | Connected TCP socket file descriptor.                  |
+| data         | in        | const char* | Null-terminated string to transmit.                    |
+| return value | out       | int32_t     | C_SUCCESS on success, C_FAILURE on failure.            |
+
+Other changes to system state include:
+
+- Writes to the socket identified by `socket_fd`.
+
+*/
+
+    int32_t socket_send(int32_t socket_fd, const char* data)
+    {
+        int32_t    status = C_SUCCESS;
+        int64_t    send_result = 0;
+
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to socket_send");
+        REQUIRES(NULL != data, "NULL data string passed to socket_send");
+
+        send_result = int64_from_ssize(send(socket_fd, data, strlen(data), MSG_NOSIGNAL));
+
+        if(0 > send_result)
+        {
+            status = C_FAILURE;
+        }
+
+        return(status);
+    }
+
+/*
+## Receive one line from a TCP socket
+
+Reads bytes from `socket_fd` one at a time until a `\n` character is received, the buffer capacity is reached, or a network error occurs. Carriage-return (`\r`) characters are discarded. The accumulated line is always null-terminated in `buffer` on return. Used to read HTTP response header lines one at a time; an empty string signals the blank line terminating the headers.
+
+### Interactions
+
+| Parameter     | Direction | Type     | Description                                                     |
+| ------------- | --------- | -------- | --------------------------------------------------------------- |
+| socket_fd     | in        | int32_t  | Connected TCP socket file descriptor.                           |
+| buffer        | out       | char*    | Caller-allocated buffer; always null-terminated on return.      |
+| buffer_length | in        | uint32_t | Byte capacity of `buffer`, including the null terminator.       |
+| return value  | out       | int32_t  | C_SUCCESS on success, C_FAILURE on failure.                     |
+
+Other changes to system state include:
+
+- Reads from the socket identified by `socket_fd`.
+- Sets `errno` to `ECONNRESET` when the remote peer closes the connection.
+
+*/
+
+    int32_t socket_recv_line(int32_t socket_fd, char* buffer, uint32_t buffer_length)
+    {
+        uint32_t    position = 0u;
+        int32_t     status = C_SUCCESS;
+        char        received_byte = '\0';
+        int64_t     recv_result = 0;
+        bool        accumulating = true;
+
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to socket_recv_line");
+        REQUIRES(NULL != buffer, "NULL buffer pointer passed to socket_recv_line");
+        REQUIRES(0u < buffer_length, "Zero-length buffer passed to socket_recv_line");
+
+        while(true == accumulating)
+        {
+            recv_result = int64_from_ssize(recv(socket_fd, &received_byte, 1u, 0));
+
+            if(0 > recv_result)
+            {
+                status = C_FAILURE;
+                accumulating = false;
+            }
+            else if(0 == recv_result)
+            {
+                errno = ECONNRESET;
+                status = C_FAILURE;
+                accumulating = false;
+            }
+            else if('\n' == received_byte)
+            {
+                accumulating = false;
+            }
+            else if('\r' == received_byte)
+            {
+                // Bare CR: discard and continue.
+            }
+            else
+            {
+                buffer[position] = received_byte;
+                position = position + 1u;
+                if(position >= (buffer_length - 1u))
+                {
+                    accumulating = false;
+                }
+            }
+        }
+
+        buffer[position] = '\0';
+
+        return(status);
+    }
+
+/*
+## Send an HTTP GET request
+
+Builds and transmits an HTTP/1.1 GET request for `path` to `socket_fd`. The request includes `Host`, `Authorization`, `Accept`, and `Connection: keep-alive` headers. The `Authorization` header value is the pre-computed `auth_header` string in the form "Basic <base64>".
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                               |
+| ------------ | --------- | ----------- | --------------------------------------------------------- |
+| socket_fd    | in        | int32_t     | Connected TCP socket file descriptor.                     |
+| path         | in        | const char* | URL path to request (e.g. C_REDFISH_PATH).                |
+| host_name    | in        | const char* | Hostname or IP address for the Host header.               |
+| auth_header  | in        | const char* | Authorization header value ("Basic <base64(user:pass)>"). |
+| return value | out       | int32_t     | C_SUCCESS on success, C_FAILURE on failure.               |
+
+Other changes to system state include:
+
+- Writes one HTTP request to `socket_fd`.
+
+*/
+
+    int32_t http_send_get(int32_t socket_fd, const char* path, const char* host_name, const char* auth_header)
+    {
+        char    request[C_HTTP_REQUEST_BUF_LEN] = {0};
+
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to http_send_get");
+        REQUIRES(NULL != path, "NULL path passed to http_send_get");
+        REQUIRES(NULL != host_name, "NULL host_name passed to http_send_get");
+        REQUIRES(NULL != auth_header, "NULL auth_header passed to http_send_get");
+
+        snprintf(request, sizeof(request),
+                 "GET %s HTTP/1.1\r\n"
+                 "Host: %s\r\n"
+                 "Authorization: %s\r\n"
+                 "Accept: application/json\r\n"
+                 "Connection: keep-alive\r\n"
+                 "\r\n",
+                 path, host_name, auth_header);
+
+        return(socket_send(socket_fd, request));
+    }
+
+/*
+## Read an HTTP response body
+
+Reads and discards HTTP response headers from `socket_fd`, checking that the status code is 200. Extracts the `Content-Length` header value, then reads exactly that many bytes into `body_buf` and null-terminates it.
+
+The implementation assumes the server sends a `Content-Length` header (as required by Redfish). Chunked transfer encoding is not supported; if `Content-Length` is absent, the function logs an error and returns C_FAILURE.
+
+The function assumes standard HTTP title-case capitalisation for `Content-Length`. Most Redfish implementations follow this convention; if the server uses a different casing, the body read will fail with a clear error message.
+
+### Interactions
+
+| Parameter    | Direction | Type     | Description                                                              |
+| ------------ | --------- | -------- | ------------------------------------------------------------------------ |
+| socket_fd    | in        | int32_t  | Connected TCP socket file descriptor.                                    |
+| body_buf     | out       | char*    | Caller-allocated buffer; receives the null-terminated JSON body on success.|
+| body_buf_len | in        | uint32_t | Byte capacity of `body_buf`, including the null terminator.              |
+| return value | out       | int32_t  | C_SUCCESS on success, C_FAILURE on failure.                              |
+
+Other changes to system state include:
+
+- Reads the complete HTTP response (headers and body) from `socket_fd`.
+
+*/
+
+    int32_t http_recv_body(int32_t socket_fd, char* body_buf, uint32_t body_buf_len)
+    {
+        char        line[C_HTTP_LINE_BUF_LEN] = {0};
+        char*       status_ptr = NULL;
+        int32_t     http_status_code = 0;
+        int32_t     content_length = -1;
+        bool        headers_done = false;
+        int32_t     status = C_SUCCESS;
+        int64_t     recv_result = 0;
+
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to http_recv_body");
+        REQUIRES(NULL != body_buf, "NULL body_buf passed to http_recv_body");
+        REQUIRES(0u < body_buf_len, "Zero-length body buffer passed to http_recv_body");
+
+        // Read and validate the HTTP status line (e.g. "HTTP/1.1 200 OK").
+        status = socket_recv_line(socket_fd, line, C_HTTP_LINE_BUF_LEN);
+        if(C_SUCCESS == status)
+        {
+            // Parse status code: skip the HTTP-version token and read the integer that follows.
+            status_ptr = strchr(line, ' ');
+            if(NULL != status_ptr)
+            {
+                // ASDFG-C 6.23 VIOLATION: strtol returns long; cast is safe for HTTP status codes (always 100-599)
+                http_status_code = (int32_t)strtol(status_ptr + 1, NULL, 10);
+            }
+
+            if(200 != http_status_code)
+            {
+                fprintf(stderr, "http_recv_body: unexpected HTTP status: %s\n", line);
+                status = C_FAILURE;
+            }
+        }
+
+        // Read remaining header lines until the blank line that separates headers from body.
+        while((C_SUCCESS == status) && (false == headers_done))
+        {
+            status = socket_recv_line(socket_fd, line, C_HTTP_LINE_BUF_LEN);
+            if(C_SUCCESS == status)
+            {
+                if('\0' == line[0])
+                {
+                    // Empty line: end of headers.
+                    headers_done = true;
+                }
+                else if((0 == strncmp(line, "Content-Length:", 15)) ||
+                        (0 == strncmp(line, "content-length:", 15)))
+                {
+                    // ASDFG-C 6.23 VIOLATION: strtol returns long; cast is safe for Content-Length values within buffer range
+                    content_length = (int32_t)strtol(line + 15, NULL, 10);
+                }
+            }
+        }
+
+        if(C_SUCCESS == status)
+        {
+            if(content_length <= 0)
+            {
+                fprintf(stderr, "http_recv_body: missing or invalid Content-Length (chunked transfer encoding not supported)\n");
+                status = C_FAILURE;
+            }
+            else if((uint32_t)content_length >= body_buf_len)
+            {
+                fprintf(stderr, "http_recv_body: Content-Length %d exceeds body buffer %u\n", content_length, body_buf_len);
+                status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == status)
+        {
+            // Read exactly content_length bytes. MSG_WAITALL requests the full count
+            // in a single call; the socket timeout (C_IO_TIMEOUT_S) bounds the wait.
+            recv_result = int64_from_ssize(recv(socket_fd, body_buf, (size_t)content_length, MSG_WAITALL));
+
+            // ASDFG-C 6.35 VIOLATION: int64_t cast to int32_t to compare with content_length; safe because content_length < body_buf_len <= UINT32_MAX
+            if((recv_result <= 0) || ((int32_t)recv_result != content_length))
+            {
+                fprintf(stderr, "http_recv_body: short body read (expected %d, got %lld)\n", content_length, (long long)recv_result);
+                status = C_FAILURE;
+            }
+            else
+            {
+                body_buf[content_length] = '\0';
+            }
+        }
+
+        return(status);
+    }
+
+/*
+## Perform one HTTP GET and extract measurements (internal helper)
+
+Sends an HTTP GET to `C_REDFISH_PATH`, reads the JSON response body, and extracts `PowerWatts.Reading` and `EnergykWh.Reading`. Called by `rfpdu_read_measurements`; not part of the public interface.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                                    |
+| ------------ | --------- | ----------- | -------------------------------------------------------------- |
+| socket_fd    | in        | int32_t     | Connected TCP socket file descriptor.                          |
+| host_name    | in        | const char* | Hostname for the HTTP Host header.                             |
+| auth_header  | in        | const char* | Pre-computed Authorization header value ("Basic <base64>").    |
+| watts_out    | out       | double*     | Receives PowerWatts.Reading on success. Not written on failure.|
+| kwh_out      | out       | double*     | Receives EnergykWh.Reading on success. Not written on failure. |
+| return value | out       | int32_t     | C_SUCCESS on success, C_FAILURE on failure.                    |
+
+*/
+
+    static int32_t rfpdu_http_get_measurements(int32_t socket_fd, const char* host_name, const char* auth_header, double* watts_out, double* kwh_out)
+    {
+        char        body_buf[C_HTTP_BODY_BUF_LEN] = {0};
+        cJSON*      json_root = NULL;
+        cJSON*      pw_obj = NULL;
+        cJSON*      pw_reading = NULL;
+        cJSON*      ek_obj = NULL;
+        cJSON*      ek_reading = NULL;
+        int32_t     status = C_SUCCESS;
+
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to rfpdu_http_get_measurements");
+        REQUIRES(NULL != host_name, "NULL host_name passed to rfpdu_http_get_measurements");
+        REQUIRES(NULL != auth_header, "NULL auth_header passed to rfpdu_http_get_measurements");
+        REQUIRES(NULL != watts_out, "NULL watts_out pointer passed to rfpdu_http_get_measurements");
+        REQUIRES(NULL != kwh_out, "NULL kwh_out pointer passed to rfpdu_http_get_measurements");
+
+        status = http_send_get(socket_fd, C_REDFISH_PATH, host_name, auth_header);
+
+        if(C_SUCCESS == status)
+        {
+            status = http_recv_body(socket_fd, body_buf, C_HTTP_BODY_BUF_LEN);
+        }
+
+        if(C_SUCCESS == status)
+        {
+            json_root = cJSON_Parse(body_buf);
+            if(NULL == json_root)
+            {
+                fprintf(stderr, "rfpdu_http_get_measurements: failed to parse JSON response\n");
+                status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == status)
+        {
+            pw_obj = cJSON_GetObjectItem(json_root, "PowerWatts");
+            if(NULL == pw_obj)
+            {
+                fprintf(stderr, "rfpdu_http_get_measurements: \"PowerWatts\" field missing from response\n");
+                status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == status)
+        {
+            pw_reading = cJSON_GetObjectItem(pw_obj, "Reading");
+            if((NULL == pw_reading) || (false == cJSON_IsNumber(pw_reading)))
+            {
+                fprintf(stderr, "rfpdu_http_get_measurements: \"PowerWatts.Reading\" field missing or not a number\n");
+                status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == status)
+        {
+            ek_obj = cJSON_GetObjectItem(json_root, "EnergykWh");
+            if(NULL == ek_obj)
+            {
+                fprintf(stderr, "rfpdu_http_get_measurements: \"EnergykWh\" field missing from response\n");
+                status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == status)
+        {
+            ek_reading = cJSON_GetObjectItem(ek_obj, "Reading");
+            if((NULL == ek_reading) || (false == cJSON_IsNumber(ek_reading)))
+            {
+                fprintf(stderr, "rfpdu_http_get_measurements: \"EnergykWh.Reading\" field missing or not a number\n");
+                status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == status)
+        {
+            // ASDFG-C 6.23 VIOLATION: cJSON stores numeric values as double; no fixed-width alternative for JSON numeric fields
+            *watts_out = pw_reading->valuedouble;
+            *kwh_out   = ek_reading->valuedouble;
+        }
+
+        if(NULL != json_root)
+        {
+            cJSON_Delete(json_root);
+        }
+
+        return(status);
+    }
+
+/*
+## Read PDU measurements, reconnecting if necessary
+
+Issues one HTTP GET via `rfpdu_http_get_measurements` and returns both readings to the caller. If the request fails (e.g. the server closed the keep-alive connection), closes the stale socket, opens a new one to the same host and port, configures its timeouts, and retries the request once. If the retry also fails, returns C_FAILURE and leaves `conn->socket_fd` set to C_FAILURE.
+
+### Interactions
+
+| Parameter    | Direction | Type                | Description                                                              |
+| ------------ | --------- | ------------------- | ------------------------------------------------------------------------ |
+| conn         | in/out    | rfpdu_connection_t* | Active connection; `socket_fd` is updated on reconnect.                  |
+| watts_out    | out       | double*             | Receives PowerWatts.Reading on success. Not written on failure.          |
+| kwh_out      | out       | double*             | Receives EnergykWh.Reading on success. Not written on failure.           |
+| return value | out       | int32_t             | C_SUCCESS on success, C_FAILURE on failure.                              |
+
+Other changes to system state include:
+
+- On reconnect: closes the stale socket and opens a new TCP connection to `conn->host_name:conn->port_num`.
+
+*/
+
+    int32_t rfpdu_read_measurements(rfpdu_connection_t* conn, double* watts_out, double* kwh_out)
+    {
+        int32_t     status = C_SUCCESS;
+        int32_t     new_fd = C_FAILURE;
+
+        REQUIRES(NULL != conn, "NULL conn pointer passed to rfpdu_read_measurements");
+        REQUIRES(C_FAILURE != conn->socket_fd, "rfpdu_read_measurements called with disconnected socket");
+        REQUIRES(NULL != watts_out, "NULL watts_out pointer passed to rfpdu_read_measurements");
+        REQUIRES(NULL != kwh_out, "NULL kwh_out pointer passed to rfpdu_read_measurements");
+
+        status = rfpdu_http_get_measurements(conn->socket_fd, conn->host_name, conn->auth_header, watts_out, kwh_out);
+
+        if(C_FAILURE == status)
+        {
+            if(true == g_abort_collect)
+            {
+                // Request was interrupted by signal delivery; do not attempt a reconnect.
+            }
+            else
+            {
+                // The connection may have been closed by the server (keep-alive timeout).
+                // Close the stale fd, reopen, and retry the request once.
+                fprintf(stderr, "rfpdu_read_measurements: request failed; attempting to reconnect to %s\n", conn->host_name);
+
+                close(conn->socket_fd);
+                conn->socket_fd = C_FAILURE;
+
+                new_fd = socket_open(conn->host_name, conn->port_num);
+                if(C_FAILURE != new_fd)
+                {
+                    if(C_SUCCESS == socket_configure_timeouts(new_fd))
+                    {
+                        conn->socket_fd = new_fd;
+                        status = rfpdu_http_get_measurements(conn->socket_fd, conn->host_name, conn->auth_header, watts_out, kwh_out);
+
+                        if(C_SUCCESS == status)
+                        {
+                            fprintf(stderr, "rfpdu_read_measurements: reconnected successfully\n");
+                        }
+                        else
+                        {
+                            fprintf(stderr, "rfpdu_read_measurements: retry after reconnect also failed\n");
+                        }
+                    }
+                    else
+                    {
+                        close(new_fd);
+                        fprintf(stderr, "rfpdu_read_measurements: failed to configure reconnected socket\n");
+                    }
+                }
+                else
+                {
+                    fprintf(stderr, "rfpdu_read_measurements: reconnect failed\n");
+                }
+            }
+        }
+        
+        return(status);
+    }
+
+/*
+## Verify the RedFish PDU endpoint
+
+Issues one test HTTP GET to `C_REDFISH_PATH` and logs the readings to stderr. Used by `rfpdu_connect` to confirm credentials and endpoint availability before the polling loop begins. The test reading is discarded.
+
+### Interactions
+
+| Parameter    | Direction | Type                | Description                                               |
+| ------------ | --------- | ------------------- | --------------------------------------------------------- |
+| conn         | in        | rfpdu_connection_t* | Active connection with a valid socket_fd.                 |
+| return value | out       | int32_t             | C_SUCCESS on success, C_FAILURE on failure.               |
+
+Other changes to system state include:
+
+- Sends one HTTP GET and reads one HTTP response.
+
+*/
+
+    int32_t rfpdu_verify(rfpdu_connection_t* conn)
+    {
+        double      tmp_watts = 0.0;
+        double      tmp_kwh = 0.0;
+        int32_t     status = C_SUCCESS;
+
+        REQUIRES(NULL != conn, "NULL conn pointer passed to rfpdu_verify");
+        REQUIRES(C_FAILURE != conn->socket_fd, "rfpdu_verify called with disconnected socket");
+
+        status = rfpdu_http_get_measurements(conn->socket_fd, conn->host_name, conn->auth_header, &tmp_watts, &tmp_kwh);
+
+        if(C_SUCCESS == status)
+        {
+            fprintf(stderr, "rfpdu_verify: connected to RedFish PDU at %s, wattage=%.3f W, energy=%.6f kWh\n",
+                    conn->host_name, tmp_watts, tmp_kwh);
+        }
+        else
+        {
+            fprintf(stderr, "rfpdu_verify: test request to %s%s failed\n", conn->host_name, C_REDFISH_PATH);
+        }
+
+        return(status);
+    }
+
+/*
+## Connect to the RedFish PDU
+
+Opens a TCP socket to `host_name:port_str`, configures socket timeouts, pre-computes the HTTP Basic authentication header from `username` and `password` using `base64_encode`, stores all connection state in `conn_out`, and issues one verification request via `rfpdu_verify`. On failure at any step the socket is closed and `conn_out->socket_fd` is set to C_FAILURE before returning.
+
+### Interactions
+
+| Parameter    | Direction | Type                | Description                                                              |
+| ------------ | --------- | ------------------- | ------------------------------------------------------------------------ |
+| host_name    | in        | const char*         | Hostname or IP address of the PDU.                                       |
+| port_str     | in        | const char*         | TCP port as a decimal string (e.g. "80").                                |
+| username     | in        | const char*         | HTTP Basic Auth username.                                                |
+| password     | in        | const char*         | HTTP Basic Auth password.                                                |
+| conn_out     | out       | rfpdu_connection_t* | Receives the fully initialised connection on success.                    |
+| return value | out       | int32_t             | C_SUCCESS on success, C_FAILURE on failure.                              |
+
+Other changes to system state include:
+
+- Opens a TCP socket and configures it for HTTP communication.
+- Sends one verification HTTP GET via `rfpdu_verify`.
+- On success, the caller must call `rfpdu_disconnect` to close the socket.
+
+*/
+
+    int32_t rfpdu_connect(const char* host_name, const char* port_str, const char* username, const char* password, rfpdu_connection_t* conn_out)
+    {
+        char        credentials[C_CREDENTIALS_BUF_LEN] = {0};
+        char        b64_buf[C_AUTH_HEADER_LEN - 7] = {0};
+        int32_t     status = C_SUCCESS;
+
+        REQUIRES(NULL != host_name, "NULL host_name passed to rfpdu_connect");
+        REQUIRES(NULL != port_str, "NULL port_str passed to rfpdu_connect");
+        REQUIRES(NULL != username, "NULL username passed to rfpdu_connect");
+        REQUIRES(NULL != password, "NULL password passed to rfpdu_connect");
+        REQUIRES(NULL != conn_out, "NULL conn_out passed to rfpdu_connect");
+
+        conn_out->socket_fd = C_FAILURE;
+        conn_out->host_name = host_name;
+        // ASDFG-C 6.23 VIOLATION: strtol returns long; cast is safe for port numbers (always 1-65535)
+        conn_out->port_num  = (uint16_t)strtol(port_str, NULL, 10);
+
+        // Build "username:password" and base64-encode it for the Authorization header.
+        snprintf(credentials, sizeof(credentials), "%s:%s", username, password);
+        status = base64_encode(credentials, strlen(credentials), b64_buf, sizeof(b64_buf));
+
+        if(C_SUCCESS == status)
+        {
+            snprintf(conn_out->auth_header, C_AUTH_HEADER_LEN, "Basic %s", b64_buf);
+        }
+
+        // Open and configure the TCP socket.
+        if(C_SUCCESS == status)
+        {
+            conn_out->socket_fd = socket_open(host_name, conn_out->port_num);
+            if(C_FAILURE == conn_out->socket_fd)
+            {
+                fprintf(stderr, "rfpdu_connect: unable to open socket to %s:%s\n", host_name, port_str);
+                status = C_FAILURE;
+            }
+        }
+
+        if(C_SUCCESS == status)
+        {
+            status = socket_configure_timeouts(conn_out->socket_fd);
+        }
+
+        // Issue a test request to verify credentials and endpoint availability.
+        if(C_SUCCESS == status)
+        {
+            status = rfpdu_verify(conn_out);
+        }
+
+        if((C_FAILURE == status) && (C_FAILURE != conn_out->socket_fd))
+        {
+            close(conn_out->socket_fd);
+            conn_out->socket_fd = C_FAILURE;
+        }
+
+        return(status);
+    }
+
+/*
+## Disconnect from the RedFish PDU
+
+Closes the socket if it is still open. RedFish is a stateless HTTP API so no teardown commands are required beyond closing the TCP connection.
+
+### Interactions
+
+| Parameter    | Direction | Type                | Description                                                   |
+| ------------ | --------- | ------------------- | ------------------------------------------------------------- |
+| conn         | in/out    | rfpdu_connection_t* | Connection to close; `socket_fd` is set to C_FAILURE on exit. |
+| return value | out       | int32_t             | C_SUCCESS always.                                             |
+
+Other changes to system state include:
+
+- Closes `conn->socket_fd` if it is not already C_FAILURE.
+
+*/
+
+    int32_t rfpdu_disconnect(rfpdu_connection_t* conn)
+    {
+        REQUIRES(NULL != conn, "NULL conn pointer passed to rfpdu_disconnect");
+
+        if(C_FAILURE != conn->socket_fd)
+        {
+            if(C_FAILURE == close(conn->socket_fd))
+            {
+                fprintf(stderr, "rfpdu_disconnect: close failed: %s\n", strerror(errno));
+            }
+            conn->socket_fd = C_FAILURE;
+        }
+
+        return(C_SUCCESS);
+    }
+
+/*
+## Opening the TCP connection
+
+`socket_open` resolves `host_name` via `getaddrinfo` and tries each returned address in order until a connection is established. On success it returns the connected socket file descriptor; on failure it returns `C_FAILURE`. The `struct addrinfo` linked list allocated by `getaddrinfo` is always freed before the function returns, regardless of outcome.
+
+### Interactions
+
+| Parameter    | Direction | Type        | Description                                               |
+| ------------ | --------- | ----------- | --------------------------------------------------------- |
+| host_name    | in        | const char* | Null-terminated hostname or IP address of the instrument. |
+| port_num     | in        | uint32_t    | TCP port number on which the instrument listens.          |
+| return value | out       | int32_t     | Connected socket file descriptor (>= 0) on success, C_FAILURE on failure. |
+
+Other changes to system state include:
+
+- Allocates and frees a `struct addrinfo` linked list via `getaddrinfo` and `freeaddrinfo`.
+- Opens a TCP socket file descriptor in the operating system on success.
+
+*/
+
+    int32_t socket_open(const char* host_name, uint32_t port_num)
+    {
+        int32_t             socket_fd = C_FAILURE;
+        char                port_num_str[C_PORT_NUM_STR_LEN] = {0};
+        struct addrinfo     hints = {0};
+        struct addrinfo*    res = NULL;
+        struct addrinfo*    rp = NULL;
+        int32_t             gai_result = 0;
+        int32_t             snprintf_result = 0;
+        int32_t             connect_result = 0;
+        bool                connect_succeeded = false;
+        bool                searching = false;
+
+        REQUIRES(NULL != host_name, "NULL host_name passed to socket_open");
+
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+
+        snprintf_result = int32_from_int(snprintf(port_num_str, C_PORT_NUM_STR_LEN, "%u", port_num));
+        ASSERT(0 < snprintf_result, "snprintf failed to format port number %u", port_num);
+
+        gai_result = getaddrinfo(host_name, port_num_str, &hints, &res);
+        if(0 != gai_result)
+        {
+            fprintf(stderr, "socket_open: getaddrinfo failed: %s\n", gai_strerror(gai_result));
+            return(C_FAILURE);
+        }
+
+        searching = true;
+        rp = res;
+        while((true == searching) && (NULL != rp))
+        {
+            socket_fd = int32_from_int(socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol));
+            if(C_FAILURE != socket_fd)
+            {
+                connect_result = connect(socket_fd, rp->ai_addr, rp->ai_addrlen);
+                if(0 == connect_result)
+                {
+                    connect_succeeded = true;
+                    searching = false;
+                }
+                else
+                {
+                    close(socket_fd);
+                    socket_fd = C_FAILURE;
+                }
+            }
+            rp = rp->ai_next;
+        }
+
+        freeaddrinfo(res);
+
+        if(false == connect_succeeded)
+        {
+            fprintf(stderr, "socket_open: failed to connect to %s:%u\n", host_name, port_num);
+            socket_fd = C_FAILURE;
+        }
+
+        return(socket_fd);
+    }
+
+/*
+## Configure socket I/O timeouts
+
+Sets `SO_RCVTIMEO` and `SO_SNDTIMEO` on `socket_fd` to `C_IO_TIMEOUT_S` seconds so that blocked send and receive calls do not hang indefinitely.
+
+### Interactions
+
+| Parameter    | Direction | Type    | Description                                   |
+| ------------ | --------- | ------- | --------------------------------------------- |
+| socket_fd    | in        | int32_t | Connected TCP socket file descriptor.         |
+| return value | out       | int32_t | C_SUCCESS on success, C_FAILURE on failure.   |
+
+Other changes to system state include:
+
+- Sets socket options on `socket_fd` via setsockopt.
+
+*/
+
+    int32_t socket_configure_timeouts(int32_t socket_fd)
+    {
+        struct timeval  io_timeout = {0};
+        int32_t         rcvtimeo_result = C_SUCCESS;
+        int32_t         sndtimeo_result = C_SUCCESS;
+        int32_t         status = C_SUCCESS;
+
+        REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to socket_configure_timeouts");
+
+        io_timeout.tv_sec  = C_IO_TIMEOUT_S;
+        io_timeout.tv_usec = 0;
+
+        rcvtimeo_result = setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, socklen_from_size(sizeof(io_timeout)));
+        sndtimeo_result = setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, socklen_from_size(sizeof(io_timeout)));
+
+        if((C_FAILURE == rcvtimeo_result) || (C_FAILURE == sndtimeo_result))
+        {
+            fprintf(stderr, "socket_configure_timeouts: setsockopt failed: %s\n", strerror(errno));
+            status = C_FAILURE;
+        }
+
+        return(status);
+    }
+
+/*
+## Base64 encode a string
+
+Encodes `input` (length `input_len`) into standard RFC 4648 base64 and writes the null-terminated result to `output`. The output buffer must be at least `((input_len + 2) / 3) * 4 + 1` bytes.
+
+Used by `rfpdu_connect` to build the HTTP Basic Authentication credential string from the "username:password" plaintext.
+
+### Interactions
+
+| Parameter   | Direction | Type        | Description                                                              |
+| ----------- | --------- | ----------- | ------------------------------------------------------------------------ |
+| input       | in        | const char* | Plaintext bytes to encode. Must not be NULL.                             |
+| input_len   | in        | size_t      | Number of bytes to encode from `input`.                                  |
+| output      | out       | char*       | Caller-allocated buffer; receives null-terminated base64 string.         |
+| output_len  | in        | size_t      | Byte capacity of `output`, including the null terminator.                |
+| return value| out       | int32_t     | C_SUCCESS on success; C_FAILURE if `output_len` is too small.            |
+
+*/
+
+    int32_t base64_encode(const char* input, size_t input_len, char* output, size_t output_len)
+    {
+        // RFC 4648 Table 1 encoding alphabet.
+        static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+        size_t  required_out = ((input_len + 2U) / 3U) * 4U + 1U;
+        size_t  in_pos = 0U;
+        size_t  out_pos = 0U;
+        size_t  remaining = 0U;
+        uint8_t b0 = 0U;
+        uint8_t b1 = 0U;
+        uint8_t b2 = 0U;
+
+        REQUIRES(NULL != input, "NULL input passed to base64_encode");
+        REQUIRES(NULL != output, "NULL output passed to base64_encode");
+
+        if(output_len < required_out)
+        {
+            fprintf(stderr, "base64_encode: output buffer too small (need %zu, have %zu)\n", required_out, output_len);
+            return(C_FAILURE);
+        }
+
+        while(in_pos < input_len)
+        {
+            remaining = input_len - in_pos;
+
+            // ASDFG-C 6.23 VIOLATION: uint8_t cast and bit operations on char values; unavoidable for base64 encoding
+            b0 = (uint8_t)input[in_pos];
+            b1 = (remaining >= 2U) ? (uint8_t)input[in_pos + 1U] : 0U;
+            b2 = (remaining >= 3U) ? (uint8_t)input[in_pos + 2U] : 0U;
+
+            output[out_pos++] = B64[ b0 >> 2 ];
+            output[out_pos++] = B64[((b0 & 0x03u) << 4) | (b1 >> 4)];
+            output[out_pos++] = (remaining >= 2U) ? B64[((b1 & 0x0Fu) << 2) | (b2 >> 6)] : '=';
+            output[out_pos++] = (remaining >= 3U) ? B64[  b2 & 0x3Fu              ] : '=';
+
+            in_pos += 3U;
+        }
+
+        output[out_pos] = '\0';
+
+        return(C_SUCCESS);
+    }
+
+/*
+## Format the current UTC time as an ISO 8601 microsecond-precision string
+
+Reads the current real-time clock via clock_gettime(CLOCK_REALTIME), converts the result to broken-down UTC time using gmtime_r, and writes a null-terminated timestamp string in the format `YYYY-MM-DDTHH:MM:SS.ffffffZ` into the caller-supplied buffer.
+
+### Interactions
+
+| Parameter    | Direction | Type   | Description                                                                     |
+| ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
+| buf          | out       | char*  | Caller-allocated buffer; must be at least `C_ISO8601_LEN` (28) bytes.           |
+| len          | in        | size_t | Byte length of buf.                                                             |
+| return value | out       | char*  | Pointer to buf on success; NULL on error.                                       |
+
+*/
+
+    char* iso8601_time(char* buf, size_t len)
+    {
+        struct timespec     ts = {0};
+        struct tm           utc_time = {0};
+        char*               iso_time_string = NULL;
+
+        REQUIRES(NULL != buf, "NULL pointer passed for buf");
+        REQUIRES(len >= C_ISO8601_LEN, "Buffer length %zu is smaller than required %u", len, C_ISO8601_LEN);
+
+        if(0 == clock_gettime(CLOCK_REALTIME, &ts))
+        {
+            if(NULL != gmtime_r(&ts.tv_sec, &utc_time))
+            {
+                snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02d.%06ldZ", utc_time.tm_year + 1900, utc_time.tm_mon  + 1, utc_time.tm_mday, utc_time.tm_hour, utc_time.tm_min, utc_time.tm_sec, (long) (ts.tv_nsec / 1000u));
+                iso_time_string = buf;
+            }
+        }
+
+        return(iso_time_string);
+    }
+
+/*
+## Handle SIGINT and pass through all other signals
+
+Installed as the SIGINT action by rfpdu_collect_values. On receipt of SIGINT, sets the global g_abort_collect flag to true, which causes the collection loop to exit cleanly after its current polling iteration completes.
+
+For any other signal, the handler restores the default system disposition via sigaction and immediately re-raises the signal.
+
+### Interactions
+
+| Parameter       | Direction | Type         | Description                                          |
+| --------------- | --------- | ------------ | ---------------------------------------------------- |
+| signum          | in        | int          | Signal number delivered by the kernel.               |
+| g_abort_collect | shared    | sig_atomic_t | Written to true when signum is SIGINT.               |
+
+*/
+
+    // ASDFG-C 6.18 VIOLATION: POSIX sigaction handler signature requires int signum; no fixed-width alternative
+    static void signal_handler(int signum)
+    {
+        struct sigaction    signal_action = {0};
+
+        if(SIGINT == signum)
+        {
+            g_abort_collect = true;
+        }
+        else
+        {
+            signal_action.sa_handler = SIG_DFL;
+            sigemptyset(&signal_action.sa_mask);
+            signal_action.sa_flags = 0;
+            sigaction(signum, &signal_action, NULL);
+            raise(signum);
+        }
+    }
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>
