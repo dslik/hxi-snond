@@ -1,21 +1,21 @@
 {
 	"Total Output Watts": {
 		"register": "238",
-		"measurand": "watts"
+		"measurand": "DC Power"
 	},
 	"3.3V Output Watts": {
 		"rail": "0",
 		"register": "150",
-		"measurand": "watts"
+		"measurand": "DC Power"
 	},
 	"5V Output Watts": {
 		"rail": "1",
 		"register": "150",
-		"measurand": "watts"
+		"measurand": "DC Power"
 	},
 	"12V Output Watts": {
 		"rail": "2",
 		"register": "150",
-		"measurand": "watts"
+		"measurand": "DC Power"
 	}
 }

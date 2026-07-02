@@ -6,7 +6,9 @@ ENSURES, or ASSERT failure. The `safety_abort` function is called exclusively
 from those three macros; it must never be called directly.
 */
 
-    #include <stdio.h>
+    #include <stdio.h>              // fprintf
+    #include <stdbool.h>            // true, false
+    #include <stdint.h>             // uint32_t
 
     #define C_STACK_DEPTH   16U  // Maximum number of stack frames to print on abort
 

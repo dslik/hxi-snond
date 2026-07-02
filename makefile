@@ -4,7 +4,7 @@ LDLIBS  += -lm
 
 TARGET      = hxi-snond gpm8310-snond rfpdu-snond
 TESTS       = asdfg-c-types-tests asdfg-c-uuid-tests
-SHARED_OBJS = asdfg-c-dbc.o asdfg-c-types.o asdfg-c-uuid.o
+SHARED_OBJS = asdfg-c-dbc.o asdfg-c-types.o asdfg-c-time.o asdfg-c-strings.o asdfg-c-uuid.o
 HXI_OBJS    = hxi-snond.o hxi-config.o cJSON.o $(SHARED_OBJS)
 GPM_OBJS    = gpm8310-snond.o cJSON.o $(SHARED_OBJS)
 RFP_OBJS    = rfpdu-snond.o cJSON.o $(SHARED_OBJS)

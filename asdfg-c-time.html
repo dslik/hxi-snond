@@ -1,0 +1,63 @@
+//<!DOCTYPE html><html><title>ASDFG-C Time Library</title><xmp theme="united" style="display:none;">
+
+    // ---------------------------------------------------------------------------------
+    // asdfg-c-time - Time library functions
+    // ---------------------------------------------------------------------------------
+    // Implements utility routines for time
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+
+    #include <time.h>               // clock_gettime, gmtime_r, struct timespec, struct tm
+
+    // Local includes
+    #include "asdfg-c-dbc.h"        // Design-by-contract library
+    #include "asdfg-c-time.h"       // Time library functions
+
+/*
+## Format the current UTC time as an ISO 8601 microsecond-precision string
+
+Reads the current real-time clock via clock_gettime(CLOCK_REALTIME), converts the result to broken-down UTC time using gmtime_r, and writes a null-terminated timestamp string in the format `YYYY-MM-DDTHH:MM:SS.ffffffZ` into the caller-supplied buffer.
+
+The buffer must be at least `C_ISO8601_LEN` (28) bytes. The trailing `Z` denotes UTC. The sub-second field `ffffff` is derived from the timespec nanosecond component: $\lfloor tv\_nsec \div 1000 \rfloor$.
+
+### Interactions
+
+| Parameter    | Direction | Type   | Description                                                                     |
+| ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
+| buf          | out       | char*  | Caller-allocated buffer that receives the null-terminated timestamp string      |
+| len          | in        | size_t | Byte length of buf; must be >= C_ISO8601_LEN (28)                               |
+| return value | out       | char*  | Pointer to buf on success; NULL if buf is NULL, len is too small, or either     |
+|              |           |        | clock_gettime or gmtime_r fails                                                 |
+
+Other changes to system state include:
+
+- Calls clock_gettime(CLOCK_REALTIME), which reads the kernel real-time clock.
+- Calls gmtime_r to convert the time_t seconds field to a broken-down UTC struct tm.
+
+*/
+
+    char* iso8601_time(char* buf, size_t len)
+    {
+        struct timespec     ts = {0};
+        struct tm           utc_time = {0};
+        char*               iso_time_string = NULL;
+
+        REQUIRES(NULL != buf, "NULL pointer passed for buf");
+        REQUIRES(len >= C_ISO8601_LEN, "Buffer length %zu is smaller than required %u", len, C_ISO8601_LEN);
+
+        if(0 == clock_gettime(CLOCK_REALTIME, &ts))
+        {
+            if(NULL != gmtime_r(&ts.tv_sec, &utc_time))
+            {
+                snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02d.%06ldZ", utc_time.tm_year + 1900, utc_time.tm_mon  + 1, utc_time.tm_mday, utc_time.tm_hour, utc_time.tm_min, utc_time.tm_sec, (long) (ts.tv_nsec / 1000u));
+                iso_time_string = buf;
+            }
+        }
+
+        return(iso_time_string);
+    }
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>

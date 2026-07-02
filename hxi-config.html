@@ -66,21 +66,6 @@ Local functions
     static int32_t hxi_config_entry_validate(const cJSON* entry);
 
 /*
-### Project globals
-
-g_valid_measurands lists every accepted value for the "measurand" field. The list
-is terminated by a NULL sentinel, which the search loop uses as its exit condition.
-*/
-
-    static const char* g_valid_measurands[] =
-    {
-        "watts",
-        "volts",
-        "amps",
-        NULL
-    };
-
-/*
 ## Validate a configuration JSON object
 
 Validates a cJSON object that must contain one or more named power rail
@@ -268,10 +253,7 @@ Other changes to system state include:
 /*
 ## Validate the measurand string field
 
-Checks that a cJSON item is a string whose value matches one of the recognized
-measurand type strings in g_valid_measurands. An unrecognized measurand value is
-treated as a validation failure. The search uses a NULL-sentinel loop over
-g_valid_measurands so that adding new types requires only a list update.
+Checks that a cJSON item is a non-empty string.
 
 ### Interactions
 
@@ -290,7 +272,6 @@ Other changes to system state include:
     {
         int32_t         result = C_VALIDATE_ERR_BAD_MEASURAND;
         const char*     measurand_str = NULL;
-        uint32_t        index = 0U;
         bool            iteration_done = false;
 
         REQUIRES(NULL != field, "field must not be NULL");
@@ -314,26 +295,10 @@ Other changes to system state include:
 
         if(!iteration_done)
         {
-            if(strlen(measurand_str) == 0U)
-            {
-                iteration_done = true;
-            }
-        }
-
-        while(!iteration_done)
-        {
-            if(NULL == g_valid_measurands[index])
-            {
-                iteration_done = true;
-            }
-            else if(strncmp(measurand_str, g_valid_measurands[index], (size_t) C_STRING_MAX_LEN) == 0)
+            if(strlen(measurand_str) != 0U)
             {
                 result = C_VALIDATE_SUCCESS;
                 iteration_done = true;
-            }
-            else
-            {
-                index = index + 1U;
             }
         }
 

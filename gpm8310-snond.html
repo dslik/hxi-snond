@@ -25,29 +25,34 @@ Known issues:
     // SPDX-License-Identifier: BSD-3-Clause
     // ---------------------------------------------------------------------------------
 
-    #include <errno.h>          // errno, ECONNRESET, ERANGE, EEXIST, ENOENT
-    #include <netdb.h>          // getaddrinfo, freeaddrinfo, struct addrinfo, gai_strerror
-    #include <stdint.h>         // Fixed-width integer types: int32_t, uint32_t
-    #include <stdbool.h>        // bool, true, false
-    #include <stdio.h>          // fprintf, snprintf, stderr
-    #include <stdlib.h>         // NULL, strtod, malloc, free
-    #include <string.h>         // strlen, strstr, strerror, strncpy, strcmp, strncmp
-    #include <unistd.h>         // close, access, symlink, R_OK, W_OK
-    #include <limits.h>         // PATH_MAX
-    #include <time.h>           // clock_gettime, gmtime_r, nanosleep, struct timespec, struct tm
-    #include <getopt.h>         // getopt, optarg
-    #include <fcntl.h>          // open, O_RDONLY, O_RDWR, O_CREAT, O_TRUNC, O_EXCL
-    #include <signal.h>         // sigaction, sigemptyset, raise, SIGINT, SA_RESTART, struct sigaction
-    #include <sys/socket.h>     // socket, connect, recv, send, setsockopt, MSG_NOSIGNAL, SOL_SOCKET, SO_RCVTIMEO, SO_SNDTIMEO
-    #include <sys/stat.h>       // mkdir, fstat, struct stat, S_IRUSR, S_IWUSR, S_IRWXU
-    #include <sys/time.h>       // struct timeval
-    #include <dirent.h>         // opendir, readdir, closedir, DIR, struct dirent
+    #include <errno.h>              // errno, ECONNRESET, ERANGE, EEXIST, ENOENT
+    #include <netdb.h>              // getaddrinfo, freeaddrinfo, struct addrinfo, gai_strerror
+    #include <stdint.h>             // Fixed-width integer types: int32_t, uint32_t
+    #include <stdbool.h>            // bool, true, false
+    #include <stdio.h>              // fprintf, snprintf, stderr
+    #include <stdlib.h>             // NULL, strtod, malloc, free
+    #include <string.h>             // strlen, strstr, strerror, strncpy, strcmp, strncmp
+    #include <unistd.h>             // close, access, symlink, R_OK, W_OK
+    #include <limits.h>             // PATH_MAX
+    #include <time.h>               // clock_gettime, gmtime_r, nanosleep, struct timespec, struct tm
+    #include <getopt.h>             // getopt, optarg
+    #include <fcntl.h>              // open, O_RDONLY, O_RDWR, O_CREAT, O_TRUNC, O_EXCL
+    #include <signal.h>             // sigaction, sigemptyset, raise, SIGINT, SA_RESTART, struct sigaction
+    #include <dirent.h>             // opendir, readdir, closedir, DIR, struct dirent
+
+    #include <sys/socket.h>         // socket, connect, recv, send, setsockopt, MSG_NOSIGNAL, SOL_SOCKET, SO_RCVTIMEO, SO_SNDTIMEO
+    #include <netinet/tcp.h>        // TCP_NODELAY
+    #include <sys/stat.h>           // mkdir, fstat, struct stat, S_IRUSR, S_IWUSR, S_IRWXU
+    #include <sys/time.h>           // struct timeval
 
     // Local includes
-    #include "asdfg-c-types.h"  // Type conversion helper functions
-    #include "asdfg-c-dbc.h"    // Design-by-contract library
-    #include "asdfg-c-uuid.h"   // UUID library
-    #include "cJSON.h"          // cJSON library
+    #include "asdfg-c-dbc.h"        // Design-by-contract library
+    #include "asdfg-c-strings.h"    // String library
+    #include "asdfg-c-time.h"       // Time library
+    #include "asdfg-c-types.h"      // Type conversion helper functions
+    #include "asdfg-c-uuid.h"       // UUID library
+
+    #include "cJSON.h"              // cJSON library
 
 /*
 ### Project constants
@@ -66,19 +71,12 @@ Constants for connecting to the device and for device control using the SCPI pro
     // SCPI
     #define C_CMD_BUF_LEN               (256u)          // SCPI Command buffer size
     #define C_RESP_BUF_LEN              (256u)          // SCPI Response buffer size
+    #define C_RECV_CHUNK_LEN            (256u)          // bytes read per recv() call in scpi_recv_line
 
     // Polling interval
     #define C_POLL_INTERVAL_NS          23000000L       // 23 ms in nanoseconds
     #define C_NS_PER_SECOND             1000000000      // 1 s in nanoseconds
-
-    // Watt-hour counter reset threshold.
-    // The GPM-8310 provides five significant digits. At 9 Wh the counter spans
-    // 0.00–9.000 Wh, keeping the LSB at 0.001 Wh throughout the session.
-    // When the raw counter reading from the previous poll meets or exceeds this
-    // value, the next poll uses the compound read/RESET/START command to
-    // snapshot the counter and zero it, adding the snapshot to the software
-    // accumulator. This holds resolution at 0.001 Wh regardless of session length.
-    #define C_WH_RESET_THRESHOLD        9.0             // Wh; trigger a counter reset on the next poll
+    #define C_POLL_INTERVAL_HOURS       ((double)C_POLL_INTERVAL_NS / ((double)C_NS_PER_SECOND * 3600.0))  // poll interval in hours, for software Wh dead-band gap-fill
 
     // Tracked measurands
     // The GPM-8310 :NUMeric:NORMal:ITEM<x> command uses U/I/P/WH as its
@@ -91,9 +89,6 @@ Constants for connecting to the device and for device control using the SCPI pro
     #define C_MEASURAND_VOLTAGE         1U              // Index of the voltage measurand
     #define C_MEASURAND_CURRENT         2U              // Index of the current measurand
     #define C_MEASURAND_WATTAGE         3U              // Index of the wattage (active power) measurand
-
-    // ISO 8601 timestamp
-    #define C_ISO8601_LEN               28U             // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
 
     // SNON JSON field keys
     #define C_SNON_EID_KEY              "eID"           // SNON entity identifier field key
@@ -152,7 +147,6 @@ Local functions
     int32_t gpm8310_make_dir_if_missing(const char* path);
     int32_t gpm8310_create_symlink_pair(const char* link_dir, const char* uuid, const char* rel_file_target, const char* rel_dir_target);
     void    snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name);
-    void    string_replace_char(char* string, char find_byte, char replace_byte);
 
     // SCPI utility routines
     int32_t scpi_send_cmd(int32_t socket_fd, const char* cmd);
@@ -166,14 +160,11 @@ Local functions
     int32_t gpm8310_connect(const char* dest_host_name, const char* dest_port_num);
     int32_t gpm8310_instrument_identify(int32_t socket_fd);
     int32_t gpm8310_instrument_configure(int32_t socket_fd);
-    int32_t gpm8310_read_measurements(int32_t socket_fd, bool do_reset, double* wh_out, double* voltage_out, double* current_out, double* wattage_out);
+    int32_t gpm8310_read_measurements(int32_t socket_fd, double* wh_out, double* voltage_out, double* current_out, double* wattage_out);
     int32_t gpm8310_disconnect(int32_t socket_fd);
 
     // ASDFG-C 6.18 VIOLATION: POSIX sigaction handler signature requires int signum; no fixed-width alternative
     static void signal_handler(int32_t signum);
-
-    // Utility functions that should be moved into common libraries
-    char* iso8601_time(char* buf, size_t len);
 
 /*
 ### Project globals
@@ -199,9 +190,9 @@ Global variables
     static const gpm8310_measurand_def_t g_measurand_defs[C_MEASURAND_COUNT] =
     {
         { "Cumulative Energy", "Wh" },
-        { "Voltage",           "V"  },
-        { "Current",           "A"  },
-        { "Wattage",           "W"  }
+        { "AC Voltage",        "V"  },
+        { "AC Current",        "A"  },
+        { "AC Power",          "W"  }
     };
 
 /*
@@ -363,11 +354,7 @@ Accumulates watt-hour, voltage, current, and wattage readings from the GPM-8310 
 
 Each polling iteration sends a single `:NUMeric:VALue?` query (via `gpm8310_read_measurements`) that returns all four readings together, so the four per-measurand `v`/`vT` arrays always share the same timestamp at a given poll index.
 
-**Watt-hour accumulation and counter reset**: The GPM-8310 provides five significant digits. To maintain 0.001 Wh resolution throughout an arbitrarily long session, this function tracks a software `wh_accumulator` (double) and periodically resets the instrument counter:
-
-- On each poll, if the raw counter reading from the *previous* poll was >= `C_WH_RESET_THRESHOLD`, the current poll uses the compound SCPI command `:NUMeric:VALue?;:INTEGrate:RESet;:INTEGrate:STARt`, which reads the counter snapshot and zeroes it in a single send/recv round trip. The snapshot is added to `wh_accumulator` before the counter restarts from zero.
-- On all other polls, a plain `:NUMeric:VALue?` is used.
-- The value stored in the SNON `v` array for the WH measurand is always `wh_accumulator + raw_counter`, giving a continuous monotonically increasing total across resets.
+**Watt-hour accumulation, counter reset, and dead-band gap-fill**: The GPM-8310 provides five significant digits. To maintain 0.001 Wh resolution throughout an arbitrarily long session, this function tracks a software `wh_accumulator` (double) and detects periodic resets in the instrument counter. During the TIMEOUT → RESET → RUNNING transition the hardware integrator returns 0 for several polls (the "dead-band"); a parallel software accumulator `sw_wh_this_cycle` fills this gap using the instantaneous wattage reading multiplied by `dt_hours`, the actual inter-poll interval measured from `CLOCK_MONOTONIC` rather than the nominal `C_POLL_INTERVAL_NS`. Using the nominal constant causes the software integrator to under-integrate because SCPI round-trip time makes each poll cycle longer than the nanosleep alone. Hardware integration is used at all other times for full accuracy. On startup, measurements are deferred until the first non-zero hardware WH reading is received; polls returning 0 before that point are discarded silently.
 
 Installs a SIGINT handler that sets `g_abort_collect`, causing the polling loop to exit cleanly. On exit the handler is unregistered. Each fragment is written to `series/<series_set->uuid[i]>/values/<start_timestamp>.json`, where `<start_timestamp>` is the ISO 8601 UTC timestamp of the first poll with colons replaced by hyphens (Section 8.6), shared by all four files. Files are written even if a read error interrupted the session, provided at least one reading was captured before the error; writes for one measurand are attempted independently of the outcome for another.
 
@@ -399,9 +386,12 @@ Other changes to system state include:
         struct timespec     poll_end = {0};
         struct timespec     sleep_duration = {0};
         double              readings[C_MEASURAND_COUNT] = {0};
-        double              wh_accumulator = 0.0;       // software total Wh across all counter resets this session
-        double              prev_wh = 0.0;              // raw counter reading from the previous poll
-        bool                do_reset = false;           // true when the next poll should use the compound reset command
+        double              wh_accumulator = 0.0;               // software total Wh across all counter resets this session
+        double              prev_wh = 0.0;                      // last non-zero hardware Wh reading, banked when the integrator resets
+        double              sw_wh_this_cycle = 0.0;             // software-integrated Wh since the last HW reset, for dead-band gap-fill
+        bool                in_dead_band = false;               // true while the hardware integrator is in TIMEOUT/RESET and returning 0
+        int64_t             prev_poll_start_ns = 0;             // CLOCK_MONOTONIC nanoseconds at start of the previous poll, 0 = not yet set
+        double              dt_hours = C_POLL_INTERVAL_HOURS;   // actual inter-poll interval in hours; updated from wall-clock each iteration
         char                timestamp[C_ISO8601_LEN] = {0};
         char                first_timestamp[C_ISO8601_LEN] = {0};
         int64_t             poll_start_nsec = 0;
@@ -478,25 +468,34 @@ Other changes to system state include:
                 clock_gettime(CLOCK_MONOTONIC, &poll_start);
                 iso8601_time(timestamp, sizeof(timestamp));
 
-                // On the first poll, record the timestamp; it becomes the value
-                // filename (Section 8.6) and remains stable for the whole session.
-                if(true == first_poll)
+                // Compute actual inter-poll interval from the monotonic clock so that
+                // software integration uses real elapsed time rather than the nominal
+                // C_POLL_INTERVAL_NS. SCPI round-trip time adds to each cycle beyond
+                // the nanosleep duration, making the true dt consistently larger than
+                // the nominal value; using the nominal constant causes the software
+                // integrator to run slower than the hardware integrator.
+                // On the first poll prev_poll_start_ns is 0, so dt_hours retains the
+                // C_POLL_INTERVAL_HOURS fallback set at initialisation.
                 {
-                    strncpy(first_timestamp, timestamp, sizeof(first_timestamp) - 1U);
-                    first_timestamp[sizeof(first_timestamp) - 1U] = '\0';
-                    first_poll = false;
+                    int64_t poll_start_ns_now = (int64_from_time(poll_start.tv_sec) * C_NS_PER_SECOND)
+                                              + int64_from_time(poll_start.tv_nsec);
+                    if(0 != prev_poll_start_ns)
+                    {
+                        dt_hours = (double)(poll_start_ns_now - prev_poll_start_ns)
+                                 / ((double)C_NS_PER_SECOND * 3600.0);
+                    }
+                    prev_poll_start_ns = poll_start_ns_now;
                 }
-
-                // Decide whether this poll should snapshot-and-reset the counter.
-                // The decision is based on the raw counter reading from the previous
-                // poll so that the reset itself is always a single send/recv operation.
-                do_reset = (prev_wh >= C_WH_RESET_THRESHOLD);
 
                 // Single combined query: all four readings come back from one
                 // round trip, keeping each poll iteration well within the
-                // C_POLL_INTERVAL_NS cadence. On reset polls the compound command
-                // atomically snapshots and zeroes the counter in the same round trip.
-                if(C_FAILURE == gpm8310_read_measurements(dev_fd, do_reset, &readings[C_MEASURAND_WH], &readings[C_MEASURAND_VOLTAGE], &readings[C_MEASURAND_CURRENT], &readings[C_MEASURAND_WATTAGE]))
+                // C_POLL_INTERVAL_NS cadence.
+
+                // The hardware resets the counter automatically every 10 seconds in
+                // CONTinuous mode. A return of 0 signals that the integrator is in the
+                // TIMEOUT/RESET dead-band; sw_wh_this_cycle bridges the gap using P*dt
+                // until hardware WH becomes non-zero again.                              // ← changed
+                if(C_FAILURE == gpm8310_read_measurements(dev_fd, &readings[C_MEASURAND_WH], &readings[C_MEASURAND_VOLTAGE], &readings[C_MEASURAND_CURRENT], &readings[C_MEASURAND_WATTAGE]))
                 {
                     if(false == g_abort_collect)
                     {
@@ -508,35 +507,71 @@ Other changes to system state include:
                 }
                 else
                 {
-                    // Watt-hour accumulation.
-                    // On a reset poll, readings[C_MEASURAND_WH] is the snapshot taken
-                    // before the counter was zeroed, so it is added to the accumulator.
-                    // The stored value for this poll is the accumulator (counter is now 0).
-                    // On a normal poll, the stored value is accumulator + raw counter.
-                    if(true == do_reset)
+                    fprintf(stderr, "%s : Value received %f  ", timestamp, readings[C_MEASURAND_WH]);
+
+                    if(readings[C_MEASURAND_WH] > 0.0)
                     {
-                        wh_accumulator = wh_accumulator + readings[C_MEASURAND_WH];
-                        prev_wh = 0.0;
-                        readings[C_MEASURAND_WH] = wh_accumulator;
-                    }
-                    else
-                    {
+                        // First non-zero hardware WH reading: begin recording. The timestamp
+                        // captured here becomes the value filename (Section 8.6) and remains
+                        // stable for the whole session.
+                        if(true == first_poll)
+                        {
+                            strncpy(first_timestamp, timestamp, sizeof(first_timestamp) - 1U);
+                            first_timestamp[sizeof(first_timestamp) - 1U] = '\0';
+                            first_poll = false;
+                        }
+
+                        if(true == in_dead_band)
+                        {
+                            // Exiting dead-band: bake the software-estimated gap energy into
+                            // wh_accumulator so the handoff back to hardware WH is seamless.
+                            // sw_wh_this_cycle held only the energy estimated during the gap;
+                            // hardware WH will now climb from 0 on top of this new offset.
+                            wh_accumulator = wh_accumulator + sw_wh_this_cycle;
+                            sw_wh_this_cycle = 0.0;
+                            in_dead_band = false;
+                        }
+
                         prev_wh = readings[C_MEASURAND_WH];
                         readings[C_MEASURAND_WH] = wh_accumulator + readings[C_MEASURAND_WH];
+
+                        fprintf(stderr, "Updated reading %f\n", readings[C_MEASURAND_WH]);
+
                     }
-
-                    measurand_index = 0U;
-                    while(measurand_index < C_MEASURAND_COUNT)
+                    else if(false == first_poll)
                     {
-                        // ASDFG-C 6.23 VIOLATION: readings[] entries are double; formatted as a
-                        // string to match the SNON v array convention used throughout this codebase
-                        snprintf(num_str, sizeof(num_str), "%g", readings[measurand_index]);
-                        cJSON_AddItemToArray(v_array[measurand_index], cJSON_CreateString(num_str));
+                        // Hardware is returning 0: the integrator is in TIMEOUT or RESET
+                        // (dead-band). On the first zero after a run, bank the last good
+                        // hardware reading so wh_accumulator represents everything the
+                        // hardware captured, then begin software integration to fill the gap.
+                        if(false == in_dead_band)
+                        {
+                            wh_accumulator = wh_accumulator + prev_wh;
+                            sw_wh_this_cycle = 0.0;
+                            in_dead_band = true;
+                        }
+                        sw_wh_this_cycle = sw_wh_this_cycle + (readings[C_MEASURAND_WATTAGE] * dt_hours);
+                        readings[C_MEASURAND_WH] = wh_accumulator + sw_wh_this_cycle;
 
-                        vt_array = cJSON_GetObjectItem(cJSON_GetArrayItem(snon_array[measurand_index], 0), "vT");
-                        cJSON_AddItemToArray(vt_array, cJSON_CreateString(timestamp));
+                        fprintf(stderr, "HW zero, SW reading %f\n", readings[C_MEASURAND_WH]);
+                    }
+                    // else: WH == 0 and first_poll is still true (startup) — discard this poll.
 
-                        measurand_index = measurand_index + 1U;
+                    if(false == first_poll)       // defer writes until hardware gives non-zero WH
+                    {
+                        measurand_index = 0U;
+                        while(measurand_index < C_MEASURAND_COUNT)
+                        {
+                            // ASDFG-C 6.23 VIOLATION: readings[] entries are double; formatted as a
+                            // string to match the SNON v array convention used throughout this codebase
+                            snprintf(num_str, sizeof(num_str), "%g", readings[measurand_index]);
+                            cJSON_AddItemToArray(v_array[measurand_index], cJSON_CreateString(num_str));
+
+                            vt_array = cJSON_GetObjectItem(cJSON_GetArrayItem(snon_array[measurand_index], 0), "vT");
+                            cJSON_AddItemToArray(vt_array, cJSON_CreateString(timestamp));
+
+                            measurand_index = measurand_index + 1U;
+                        }
                     }
 
                     clock_gettime(CLOCK_MONOTONIC, &poll_end);
@@ -753,50 +788,6 @@ Other changes to system state include:
     }
 
 /*
-## string_replace_char
-
-Replaces every occurrence of a target byte value within a null-terminated string with a substitute byte value. The string is modified in place and its length is unchanged after the call.
-
-Used to convert ISO 8601 timestamps into filesystem-safe value filenames by replacing ':' with '-' (Section 8.6).
-
-### Interactions
-
-| Parameter    | Direction | Type   | Description                                                                     |
-| ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
-| string       | in/out    | char*  | Pointer to the null-terminated string to modify in place. Must not be NULL.     |
-| find_byte    | in        | char   | The byte value to search for within `string`.                                   |
-| replace_byte | in        | char   | The byte value to substitute for each occurrence of `find_byte`.                |
-
-Other changes to system state include:
-
-- The string pointed to by `string` is modified in place.
-
-*/
-
-    void string_replace_char(char* string, char find_byte, char replace_byte)
-    {
-        uint32_t    string_length = 0U;
-        uint32_t    index = 0U;
-
-        REQUIRES(NULL != string, "NULL value passed for string");
-        REQUIRES('\0' != replace_byte, "replace_byte must not be the null terminator");
-
-        string_length = strlen(string);
-
-        while(index < string_length)
-        {
-            if(string[index] == find_byte)
-            {
-                string[index] = replace_byte;
-            }
-
-            index = index + 1U;
-        }
-
-        ENSURES(strlen(string) == string_length, "String length changed unexpectedly: expected %zu, got %zu", string_length, strlen(string));
-    }
-
-/*
 ## gpm8310_make_dir_if_missing
 
 Creates `path` as a directory if it does not already exist. EEXIST is treated as success so that calls on an already-initialised SNON tree are idempotent.
@@ -928,6 +919,7 @@ Other changes to system state include:
         char            new_file_path[PATH_MAX + 1024] = {0};
         char            new_uuid[C_UUID_LEN] = {0};
         char            working_string[1024] = {0};
+        char            eut_buf[C_ISO8601_LEN] = {0};
         DIR*            dir_handle = NULL;
         struct dirent*  dir_entry = NULL;
         struct stat     stat_buf;
@@ -1080,6 +1072,14 @@ Other changes to system state include:
                 cJSON_AddItemToObjectCS(measurand_obj, "meT", cJSON_CreateString("numeric"));
                 
                 snon_addname(measurand_obj, "eN", "*", measurand_name);
+
+                if(NULL != iso8601_time(eut_buf, sizeof(eut_buf)))
+                {
+                    cJSON_AddItemToObjectCS(measurand_obj, "eUT", cJSON_CreateString(eut_buf));
+                }
+
+                cJSON_AddItemToObjectCS(measurand_obj, "meAq", cJSON_CreateString("sample"));
+                snon_addname(measurand_obj, "meUS", "*", measurand_unit);
                 cJSON_AddItemToArray(snon_root, measurand_obj);
 
                 snon_output = cJSON_PrintUnformatted(snon_root);
@@ -1307,6 +1307,7 @@ Other changes to system state include:
         cJSON*      snon_root = NULL;
         cJSON*      entity_obj = NULL;
         char        working_string[1024] = {0};
+        char        eut_buf[C_ISO8601_LEN] = {0};
         char*       snon_output = NULL;
         size_t      output_len = 0U;
         ssize_t     bytes_written = 0;
@@ -1350,8 +1351,13 @@ Other changes to system state include:
             cJSON_AddItemToObjectCS(entity_obj, "eID", cJSON_CreateString(working_string));
             cJSON_AddItemToObjectCS(entity_obj, "eC",  cJSON_CreateString("device"));
             snon_addname(entity_obj, "eN", "*", "GPM-8310 Power Analyzer");
-            cJSON_AddItemToArray(snon_root, entity_obj);
 
+            if(NULL != iso8601_time(eut_buf, sizeof(eut_buf)))
+            {
+                cJSON_AddItemToObjectCS(entity_obj, "eUT", cJSON_CreateString(eut_buf));
+            }
+
+            cJSON_AddItemToArray(snon_root, entity_obj);
             snon_output = cJSON_PrintUnformatted(snon_root);
             ASSERT(NULL != snon_output, "cJSON_PrintUnformatted() returned NULL; memory exhausted");
 
@@ -1452,6 +1458,7 @@ Other changes to system state include:
         char        series_uuid[C_UUID_LEN] = {0};
         char        measurand_uuid[C_UUID_LEN] = {0};
         char        working_string[1024] = {0};
+        char        eut_buf[C_ISO8601_LEN] = {0};
         char*       snon_output = NULL;
         size_t      output_len = 0U;
         ssize_t     bytes_written = 0;
@@ -1522,6 +1529,12 @@ Other changes to system state include:
                     cJSON_AddItemToObjectCS(relation_object, "measurand", relation_array);
 
                     cJSON_AddItemToObjectCS(entity_obj, "eR", relation_object);
+
+                    if(NULL != iso8601_time(eut_buf, sizeof(eut_buf)))
+                    {
+                        cJSON_AddItemToObjectCS(entity_obj, "eUT", cJSON_CreateString(eut_buf));
+                    }
+
                     cJSON_AddItemToArray(snon_root, entity_obj);
 
                     snon_output = cJSON_PrintUnformatted(snon_root);
@@ -1632,6 +1645,15 @@ Other changes to system state include:
             cJSON_AddItemToObjectCS(relation_object, "measurand", relation_array);
 
             cJSON_AddItemToObjectCS(entity_obj, "eR", relation_object);
+
+            if(NULL != iso8601_time(eut_buf, sizeof(eut_buf)))
+            {
+                cJSON_AddItemToObjectCS(entity_obj, "eUT", cJSON_CreateString(eut_buf));
+            }
+
+            // meUR and meTo are derived from C_POLL_INTERVAL_NS (23 ms)
+            cJSON_AddItemToObjectCS(entity_obj, "meUR", cJSON_CreateString("0.023"));
+            cJSON_AddItemToObjectCS(entity_obj, "meTo", cJSON_CreateString("0.23"));
             cJSON_AddItemToArray(snon_root, entity_obj);
 
             snon_output = cJSON_PrintUnformatted(snon_root);
@@ -1710,6 +1732,7 @@ Other changes to system state include:
     {
         int32_t    status = C_SUCCESS;
         int64_t    send_result = 0;
+        int32_t    quickack = 1;
 
         REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to scpi_send_cmd");
         REQUIRES(NULL != cmd, "NULL command string passed to scpi_send_cmd");
@@ -1719,6 +1742,14 @@ Other changes to system state include:
         if(0 > send_result)
         {
             status = C_FAILURE;
+        }
+        else
+        {
+            // Suppress delayed ACK for the upcoming response to break the Nagle /
+            // delayed-ACK deadlock that occurs when the instrument sends its response
+            // in more than one TCP write. TCP_QUICKACK is reset on each send, so must
+            // be set after every send.
+            (void) setsockopt(socket_fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
         }
 
         return(status);
@@ -1745,11 +1776,13 @@ Other changes to system state include:
 
 */
 
-    int32_t scpi_recv_line(int32_t socket_fd, char* buffer, uint32_t buffer_length)
+int32_t scpi_recv_line(int32_t socket_fd, char* buffer, uint32_t buffer_length)
     {
+        char        recv_chunk[C_RECV_CHUNK_LEN];
         uint32_t    position = 0u;
+        uint32_t    chunk_index = 0u;
+        uint32_t    chunk_len = 0u;
         int32_t     status = C_SUCCESS;
-        char        received_byte = '\0';
         int64_t     recv_result = 0;
         bool        accumulating = true;
 
@@ -1759,45 +1792,46 @@ Other changes to system state include:
 
         while(true == accumulating)
         {
-            recv_result = int64_from_ssize(recv(socket_fd, &received_byte, 1u, 0));
+            recv_result = int64_from_ssize(recv(socket_fd, recv_chunk, sizeof(recv_chunk), 0));
 
             if(0 > recv_result)
             {
-                // recv returned -1: a network error occurred, or SO_RCVTIMEO expired.
                 status = C_FAILURE;
                 accumulating = false;
             }
             else if(0 == recv_result)
             {
-                // recv returned 0: the server closed the connection.
                 errno = ECONNRESET;
                 status = C_FAILURE;
                 accumulating = false;
             }
-            else if('\n' == received_byte)
-            {
-                // End-of-line marker received: stop accumulating.
-                accumulating = false;
-            }
-            else if('\r' == received_byte)
-            {
-                // Bare CR character: discard and continue.
-            }
             else
             {
-                // Printable character: accumulate it into the buffer.
-                buffer[position] = received_byte;
-                position = position + 1u;
-                if(position >= (buffer_length - 1u))
+                chunk_len = (uint32_t) recv_result;
+                chunk_index = 0u;
+
+                while((chunk_index < chunk_len) && (true == accumulating))
                 {
-                    // Buffer capacity reached: stop to preserve the null-terminator slot.
-                    accumulating = false;
+                    if('\n' == recv_chunk[chunk_index])
+                    {
+                        accumulating = false;
+                    }
+                    else if('\r' != recv_chunk[chunk_index])
+                    {
+                        buffer[position] = recv_chunk[chunk_index];
+                        position = position + 1u;
+                        if(position >= (buffer_length - 1u))
+                        {
+                            accumulating = false;
+                        }
+                    }
+
+                    chunk_index = chunk_index + 1u;
                 }
             }
         }
 
         buffer[position] = '\0';
-
         return(status);
     }
 
@@ -1831,6 +1865,8 @@ Other changes to system state include:
         int32_t             gai_result = 0;
         int32_t             snprintf_result = 0;
         int32_t             connect_result = 0;
+        int32_t             socket_opt_result = 0;
+        int                 socket_flag = 1;
         bool                connect_succeeded = false;
         bool                searching = false;
 
@@ -1898,6 +1934,16 @@ Other changes to system state include:
             {
                 fprintf(stderr, "socket_open: cannot reach %s:%u: %s\n", host_name, port_num, strerror(errno));
                 socket_fd = C_FAILURE;
+            }
+        }
+
+        if(true == connect_succeeded)
+        {
+            // Disable Nagle to reduce latency for reading data
+            socket_opt_result = setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &socket_flag, sizeof(int));
+            if(C_SUCCESS != socket_opt_result)
+            {
+                fprintf(stderr, "Error - Unable to disable Nagle for GPM8310 socket");
             }
         }
 
@@ -2009,15 +2055,16 @@ The commands issued are:
 
 1. `*CLS` - clear the status registers and error queue.
 2. `:RATE 100MS` - set the internal measurement period to 100 ms.
-3. `:INTEGrate:FUNCtion WATThour` - select watt-hour as the integrated quantity.
-4. `:INTEGrate:MODE MANual` - set the integrator to run until `:INTEGrate:STOP` is issued, rather than for a fixed time.
-5. `:INTEGrate:RESet` - zero any previously accumulated energy.
-6. `:NUMeric:NORMal:ITEM1 WH` - bind numeric read-slot 1 to total Wh.
-7. `:NUMeric:NORMal:ITEM2 U` - bind numeric read-slot 2 to instantaneous voltage (GPM-8310's `U` function mnemonic).
-8. `:NUMeric:NORMal:ITEM3 I` - bind numeric read-slot 3 to instantaneous current.
-9. `:NUMeric:NORMal:ITEM4 P` - bind numeric read-slot 4 to instantaneous active power (wattage).
-10. `:NUMeric:NORMal:NUMber 4` - limit the number of values a parameterless `:NUMeric:VALue?` query returns to exactly the four slots bound above.
-11. `:INTEGrate:STARt` - begin accumulation.
+3. `:INTEGrate:RESet` - zero any previously accumulated energy.
+4. `:INTEGrate:FUNCtion WH` - select watt-hour as the integrated quantity.
+5. `:INTEGrate:MODE CONTinuous` - set the integrator to reset and restart automatically at the end of each timer period.
+6. `:INTEGrate:TIMer 0,0,10` - set the reset period to 10 seconds (hours, minutes, seconds).
+7. `:NUMeric:NORMal:ITEM1 WH` - bind numeric read-slot 1 to total Wh.
+8. `:NUMeric:NORMal:ITEM2 U` - bind numeric read-slot 2 to instantaneous voltage (GPM-8310's `U` function mnemonic).
+9. `:NUMeric:NORMal:ITEM3 I` - bind numeric read-slot 3 to instantaneous current.
+10. `:NUMeric:NORMal:ITEM4 P` - bind numeric read-slot 4 to instantaneous active power (wattage).
+11. `:NUMeric:NORMal:NUMber 4` - limit the number of values a parameterless `:NUMeric:VALue?` query returns to exactly the four slots bound above.
+12. `:INTEGrate:STARt` - begin accumulation.
 
 After a successful return the instrument integrator is running and a single `:NUMeric:VALue?` query (Section "GPM-8310 User Manual Rev. C, Command List, `:NUMeric[:NORMal]:VALue`") returns all four readings, comma-separated, in slot order.
 
@@ -2037,7 +2084,8 @@ Other changes to system state include:
 
     int32_t gpm8310_instrument_configure(int32_t socket_fd)
     {
-        int32_t    status = C_SUCCESS;
+        int32_t     status = C_SUCCESS;
+        char        resp[C_RESP_BUF_LEN] = {0};
 
         REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_instrument_configure");
 
@@ -2051,22 +2099,28 @@ Other changes to system state include:
             status = scpi_send_cmd(socket_fd, ":RATE 100MS\r\n");
         }
 
+        // :INTEGrate:RESet - zero any previously accumulated energy.
+        if(C_SUCCESS == status)
+        {
+            status = scpi_send_cmd(socket_fd, ":INTEGrate:RESet\r\n");
+        }
+
         // :INTEGrate:FUNCtion WATThour - select watt-hour accumulation.
         if(C_SUCCESS == status)
         {
             status = scpi_send_cmd(socket_fd, ":INTEGrate:FUNCtion WATThour\r\n");
         }
 
-        // :INTEGrate:MODE MANual - run continuously until :INTEGrate:STOP is sent.
+        // :INTEGrate:MODE CONTinuous - run continuously until timer expires.
         if(C_SUCCESS == status)
         {
-            status = scpi_send_cmd(socket_fd, ":INTEGrate:MODE MANual\r\n");
+            status = scpi_send_cmd(socket_fd, ":INTEGrate:MODE CONTinuous\r\n");
         }
 
-        // :INTEGrate:RESet - zero any previously accumulated energy.
+        // :INTEGrate:TIMer - run for ten seconds.
         if(C_SUCCESS == status)
         {
-            status = scpi_send_cmd(socket_fd, ":INTEGrate:RESet\r\n");
+            status = scpi_send_cmd(socket_fd, ":INTEGrate:TIMer 0,0,10\r\n");
         }
 
         // :NUMeric:NORMal:ITEM1 WH - bind read-slot 1 to total accumulated Wh.
@@ -2107,6 +2161,55 @@ Other changes to system state include:
         if(C_SUCCESS == status)
         {
             status = scpi_send_cmd(socket_fd, ":INTEGrate:STARt\r\n");
+        }
+
+        // Check configuration
+        status = scpi_send_cmd(socket_fd, ":INTEGrate:MODE?\r\n");
+        if (C_SUCCESS == status)
+        {
+            status = scpi_recv_line(socket_fd, resp, C_RESP_BUF_LEN);
+        }
+
+        if (C_SUCCESS == status)
+        {
+            printf("[MODE]  %s\n", resp);   /* expect: REPE  */
+        }
+        else
+        {
+            fprintf(stderr, "[MODE]  query failed (status=%d)\n", status);
+            return status;
+        }
+     
+        status = scpi_send_cmd(socket_fd, ":INTEGrate:TIMer?\r\n");
+        if (C_SUCCESS == status)
+        {
+            status = scpi_recv_line(socket_fd, resp, C_RESP_BUF_LEN);
+        }
+
+        if (C_SUCCESS == status)
+        {
+            printf("[TIMER] %s\n", resp);   /* expect: 0,0,10  */
+        }
+        else
+        {
+            fprintf(stderr, "[TIMER] query failed (status=%d)\n", status);
+            return status;
+        }
+     
+        status = scpi_send_cmd(socket_fd, ":INTEGrate:FUNCtion?\r\n");
+        if (C_SUCCESS == status)
+        {
+            status = scpi_recv_line(socket_fd, resp, C_RESP_BUF_LEN);
+        }
+
+        if (C_SUCCESS == status)
+        {
+            printf("[FUNC]  %s\n", resp);   /* expect: WH  */
+        }
+        else
+        {
+            fprintf(stderr, "[FUNC]  query failed (status=%d)\n", status);
+            return status;
         }
 
         return(status);
@@ -2181,16 +2284,6 @@ Other changes to system state include:
 
 `gpm8310_read_measurements` sends one SCPI command and reads one response, returning four comma-separated values in slot order: total watt-hours (slot 1), voltage (slot 2), current (slot 3), wattage (slot 4).
 
-When `do_reset` is false, the command is a plain `:NUMeric:VALue?`. When `do_reset` is true, the command is the compound message:
-
-```
-:NUMeric:VALue?;:INTEGrate:RESet;:INTEGrate:STARt
-```
-
-`:NUMeric:VALue?` appears first, so its response reflects the counter value immediately before the reset. The instrument processes the remaining sub-commands (reset and restart) before making the response available to the host, so the counter is always zeroed before the next poll reads it. Both paths are one `scpi_send_cmd` + one `scpi_recv_line`; the reset-path sends a longer string on the wire but has no additional network round trips.
-
-For the reset-path, `wh_out` receives the counter snapshot taken *before* the reset, not the value after (which is zero). The caller (`gpm8310_collect_values`) is responsible for adding this snapshot to its software accumulator.
-
 The use of floating point is unavoidable here: the GPM-8310 reports measurements in scientific notation and `strtod` returns `double`. See the annotation below for the corresponding rule deviation.
 
 `errno` is explicitly cleared to zero immediately before each `strtod` call so that the subsequent `ERANGE` check is not confused by an earlier error from a different system call.
@@ -2200,7 +2293,6 @@ The use of floating point is unavoidable here: the GPM-8310 reports measurements
 | Parameter     | Direction | Type    | Description                                                                        |
 | ------------- | --------- | ------- | -----------------------------------------------------------------------------------|
 | socket_fd     | in        | int32_t | Socket file descriptor returned by `gpm8310_connect`.                              |
-| do_reset      | in        | bool    | If true, sends the compound read/RESET/START command instead of a plain read.      |
 | wh_out        | out       | double* | Receives watt-hours (slot 1 snapshot) on success. Not written on failure.          |
 | voltage_out   | out       | double* | Receives instantaneous voltage (slot 2) on success. Not written on failure.        |
 | current_out   | out       | double* | Receives instantaneous current (slot 3) on success. Not written on failure.        |
@@ -2210,12 +2302,11 @@ The use of floating point is unavoidable here: the GPM-8310 reports measurements
 Other changes to system state include:
 
 - Sends one SCPI command and reads one line of response.
-- When `do_reset` is true, the instrument integrator is reset and restarted as a side effect.
 - Sets `errno` to 0 before each `strtod` call.
 
 */
 
-    int32_t gpm8310_read_measurements(int32_t socket_fd, bool do_reset, double* wh_out, double* voltage_out, double* current_out, double* wattage_out)
+    int32_t gpm8310_read_measurements(int32_t socket_fd, double* wh_out, double* voltage_out, double* current_out, double* wattage_out)
     {
         // Normal path: plain numeric query.
         static const char C_CMD_READ[]  = ":NUMeric:VALue?\r\n";
@@ -2232,14 +2323,13 @@ Other changes to system state include:
         // between the :NUMeric:VALue? execution and the :INTEGrate:RESet execution
         // is purely instrument-internal command processing time and is negligible
         // relative to the instrument's 0.001 Wh resolution floor.
-        static const char C_CMD_RESET[] = ":NUMeric:VALue?;:INTEGrate:RESet;:INTEGrate:STARt\r\n";
 
-        char       resp[C_RESP_BUF_LEN] = {0};
-        char*      parse_pos = NULL;
-        char*      parse_end = NULL;
-        double     values[C_MEASURAND_COUNT] = {0};
-        uint32_t   value_index = 0U;
-        int32_t    status = C_SUCCESS;
+        char                resp[C_RESP_BUF_LEN] = {0};
+        char*               parse_pos = NULL;
+        char*               parse_end = NULL;
+        double              values[C_MEASURAND_COUNT] = {0};
+        uint32_t            value_index = 0U;
+        int32_t             status = C_SUCCESS;
 
         REQUIRES(0 <= socket_fd, "Invalid file descriptor passed to gpm8310_read_measurements");
         REQUIRES(NULL != wh_out, "NULL wh_out pointer passed to gpm8310_read_measurements");
@@ -2247,7 +2337,7 @@ Other changes to system state include:
         REQUIRES(NULL != current_out, "NULL current_out pointer passed to gpm8310_read_measurements");
         REQUIRES(NULL != wattage_out, "NULL wattage_out pointer passed to gpm8310_read_measurements");
 
-        status = scpi_send_cmd(socket_fd, (true == do_reset) ? C_CMD_RESET : C_CMD_READ);
+        status = scpi_send_cmd(socket_fd, C_CMD_READ);
         if(C_SUCCESS == status)
         {
             status = scpi_recv_line(socket_fd, resp, C_RESP_BUF_LEN);
@@ -2255,7 +2345,13 @@ Other changes to system state include:
 
         if(C_SUCCESS != status)
         {
-            fprintf(stderr, "gpm8310_read_measurements: communication failed: %s\n", strerror(errno));
+            // EINTR means a signal interrupted the call (e.g. SIGINT from the user) — not
+            // a real communication failure. The caller checks g_abort_collect and handles
+            // this cleanly, so don't log it as an error here.
+            if(EINTR != errno)
+            {
+                fprintf(stderr, "gpm8310_read_measurements: communication failed: %s\n", strerror(errno));
+            }
         }
         else
         {
@@ -2355,50 +2451,6 @@ Other changes to system state include:
         }
 
         return(C_SUCCESS);
-    }
-
-/*
-## Format the current UTC time as an ISO 8601 microsecond-precision string
-
-Reads the current real-time clock via clock_gettime(CLOCK_REALTIME), converts the result to broken-down UTC time using gmtime_r, and writes a null-terminated timestamp string in the format `YYYY-MM-DDTHH:MM:SS.ffffffZ` into the caller-supplied buffer.
-
-The buffer must be at least `C_ISO8601_LEN` (28) bytes. The trailing `Z` denotes UTC. The sub-second field `ffffff` is derived from the timespec nanosecond component: $\lfloor tv\_nsec \div 1000 \rfloor$.
-
-### Interactions
-
-| Parameter    | Direction | Type   | Description                                                                     |
-| ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
-| buf          | out       | char*  | Caller-allocated buffer that receives the null-terminated timestamp string      |
-| len          | in        | size_t | Byte length of buf; must be >= C_ISO8601_LEN (28)                               |
-| return value | out       | char*  | Pointer to buf on success; NULL if buf is NULL, len is too small, or either     |
-|              |           |        | clock_gettime or gmtime_r fails                                                 |
-
-Other changes to system state include:
-
-- Calls clock_gettime(CLOCK_REALTIME), which reads the kernel real-time clock.
-- Calls gmtime_r to convert the time_t seconds field to a broken-down UTC struct tm.
-
-*/
-
-    char* iso8601_time(char* buf, size_t len)
-    {
-        struct timespec     ts = {0};
-        struct tm           utc_time = {0};
-        char*               iso_time_string = NULL;
-
-        REQUIRES(NULL != buf, "NULL pointer passed for buf");
-        REQUIRES(len >= C_ISO8601_LEN, "Buffer length %zu is smaller than required %u", len, C_ISO8601_LEN);
-
-        if(0 == clock_gettime(CLOCK_REALTIME, &ts))
-        {
-            if(NULL != gmtime_r(&ts.tv_sec, &utc_time))
-            {
-                snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02d.%06ldZ", utc_time.tm_year + 1900, utc_time.tm_mon  + 1, utc_time.tm_mday, utc_time.tm_hour, utc_time.tm_min, utc_time.tm_sec, (long) (ts.tv_nsec / 1000u));
-                iso_time_string = buf;
-            }
-        }
-
-        return(iso_time_string);
     }
 
 /*

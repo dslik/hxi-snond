@@ -1,0 +1,1 @@
+    void string_replace_char(char* string, char find_byte, char replace_byte);

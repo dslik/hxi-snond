@@ -1,0 +1,64 @@
+//<!DOCTYPE html><html><title>ASDFG-C String Library</title><xmp theme="united" style="display:none;">
+
+    // ---------------------------------------------------------------------------------
+    // asdfg-c-strings - String library functions
+    // ---------------------------------------------------------------------------------
+    // Implements utility routines for string processing
+    // ---------------------------------------------------------------------------------
+    // SPDX-FileCopyrightText: Copyright 2026 David Slik
+    // SPDX-FileAttributionText: https://github.com/dslik/asdfg-c/
+    // SPDX-License-Identifier: BSD-3-Clause
+    // ---------------------------------------------------------------------------------
+
+    #include <stdint.h>             // int32_t
+    #include <string.h>             // strlen
+
+    // Local includes
+    #include "asdfg-c-dbc.h"        // Design-by-contract library
+    #include "asdfg-c-strings.h"    // String library functions
+
+/*
+## string_replace_char
+
+Replaces every occurrence of a target byte value within a null-terminated string with a substitute byte value. The string is modified in place and its length is unchanged after the call.
+
+This function operates on raw bytes, not Unicode code points. It is safe to use on UTF-8 encoded strings only when both `find_byte` and `replace_byte` are single-byte ASCII values (U+0000 to U+007F). Replacing bytes that form part of a multi-byte UTF-8 sequence may produce invalid UTF-8 output.
+
+### Interactions
+
+| Parameter    | Direction | Type   | Description                                                                     |
+| ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
+| string       | in/out    | char*  | Pointer to the null-terminated string to modify in place. Must not be NULL.     |
+| find_byte    | in        | char   | The byte value to search for within `string`.                                   |
+| replace_byte | in        | char   | The byte value to substitute for each occurrence of `find_byte`. Must not be the null terminator (`'\0'`). |
+
+Other changes to system state include:
+
+- The string pointed to by `string` is modified in place.
+
+*/
+
+    void string_replace_char(char* string, char find_byte, char replace_byte)
+    {
+        uint32_t    string_length = 0U;
+        uint32_t    index = 0U;
+
+        REQUIRES(NULL != string, "NULL value passed for string");
+        REQUIRES('\0' != replace_byte, "replace_byte must not be the null terminator");
+
+        string_length = strlen(string);
+
+        while(index < string_length)
+        {
+            if(string[index] == find_byte)
+            {
+                string[index] = replace_byte;
+            }
+
+            index = index + 1U;
+        }
+
+        ENSURES(strlen(string) == string_length, "String length changed unexpectedly: expected %zu, got %zu", string_length, strlen(string));
+    }
+
+//</xmp><script src="weave.js"></script><script> var t, walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false); while(t=walk.nextNode()){ t.nodeValue = t.nodeValue.replace(/\/\*|\*\//g, "");} </script><style>h2 { background-color: #FFF0F0; }</style></html>

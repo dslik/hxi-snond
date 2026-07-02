@@ -28,29 +28,32 @@ Known issues:
     // SPDX-License-Identifier: BSD-3-Clause
     // ---------------------------------------------------------------------------------
 
-    #include <errno.h>          // errno, ECONNRESET, EEXIST, ENOENT
-    #include <netdb.h>          // getaddrinfo, freeaddrinfo, struct addrinfo, gai_strerror
-    #include <stdint.h>         // Fixed-width integer types: int32_t, uint32_t
-    #include <stdbool.h>        // bool, true, false
-    #include <stdio.h>          // fprintf, snprintf, stderr
-    #include <stdlib.h>         // NULL, strtol, malloc, free
-    #include <string.h>         // strlen, strstr, strerror, strncpy, strcmp, strncmp
-    #include <unistd.h>         // close, access, symlink, read, write, R_OK, W_OK
-    #include <limits.h>         // PATH_MAX
-    #include <time.h>           // clock_gettime, gmtime_r, nanosleep, struct timespec, struct tm
-    #include <getopt.h>         // getopt, optarg
-    #include <fcntl.h>          // open, O_RDONLY, O_RDWR, O_CREAT, O_EXCL
-    #include <signal.h>         // sigaction, sigemptyset, raise, SIGINT, SA_RESTART, struct sigaction
-    #include <sys/socket.h>     // socket, connect, recv, send, setsockopt, MSG_NOSIGNAL, MSG_WAITALL, SOL_SOCKET, SO_RCVTIMEO, SO_SNDTIMEO
-    #include <sys/stat.h>       // mkdir, fstat, struct stat, S_IRUSR, S_IWUSR, S_IRWXU
-    #include <sys/time.h>       // struct timeval
-    #include <dirent.h>         // opendir, readdir, closedir, DIR, struct dirent
+    #include <errno.h>              // errno, ECONNRESET, EEXIST, ENOENT
+    #include <netdb.h>              // getaddrinfo, freeaddrinfo, struct addrinfo, gai_strerror
+    #include <stdint.h>             // Fixed-width integer types: int32_t, uint32_t
+    #include <stdbool.h>            // bool, true, false
+    #include <stdio.h>              // fprintf, snprintf, stderr
+    #include <stdlib.h>             // NULL, strtol, malloc, free
+    #include <string.h>             // strlen, strstr, strerror, strncpy, strcmp, strncmp
+    #include <unistd.h>             // close, access, symlink, read, write, R_OK, W_OK
+    #include <limits.h>             // PATH_MAX
+    #include <time.h>               // clock_gettime, gmtime_r, nanosleep, struct timespec, struct tm
+    #include <getopt.h>             // getopt, optarg
+    #include <fcntl.h>              // open, O_RDONLY, O_RDWR, O_CREAT, O_EXCL
+    #include <signal.h>             // sigaction, sigemptyset, raise, SIGINT, SA_RESTART, struct sigaction
+    #include <sys/socket.h>         // socket, connect, recv, send, setsockopt, MSG_NOSIGNAL, MSG_WAITALL, SOL_SOCKET, SO_RCVTIMEO, SO_SNDTIMEO
+    #include <sys/stat.h>           // mkdir, fstat, struct stat, S_IRUSR, S_IWUSR, S_IRWXU
+    #include <sys/time.h>           // struct timeval
+    #include <dirent.h>             // opendir, readdir, closedir, DIR, struct dirent
 
     // Local includes
-    #include "asdfg-c-types.h"  // Type conversion helper functions
-    #include "asdfg-c-dbc.h"    // Design-by-contract library
-    #include "asdfg-c-uuid.h"   // UUID library
-    #include "cJSON.h"          // cJSON library
+    #include "asdfg-c-dbc.h"        // Design-by-contract library
+    #include "asdfg-c-strings.h"    // String library
+    #include "asdfg-c-time.h"       // Time library
+    #include "asdfg-c-types.h"      // Type conversion helper functions
+    #include "asdfg-c-uuid.h"       // UUID library
+
+    #include "cJSON.h"              // cJSON library
 
 /*
 ### Project constants
@@ -82,9 +85,6 @@ Constants for connecting to the device and for polling via the Redfish API over 
     #define C_MEASURAND_COUNT           2U              // Number of quantities polled and tracked per session
     #define C_MEASURAND_WATTS           0U              // Index of the wattage (PowerWatts.Reading) measurand
     #define C_MEASURAND_KWH             1U              // Index of the cumulative energy (EnergykWh.Reading) measurand
-
-    // ISO 8601 timestamp
-    #define C_ISO8601_LEN               28U             // Buffer size for "YYYY-MM-DDTHH:MM:SS.ffffffZ\0"
 
     // SNON JSON field keys
     #define C_SNON_EID_KEY              "eID"           // SNON entity identifier field key
@@ -155,7 +155,6 @@ Local functions
     int32_t rfpdu_make_dir_if_missing(const char* path);
     int32_t rfpdu_create_symlink_pair(const char* link_dir, const char* uuid, const char* rel_file_target, const char* rel_dir_target);
     void    snon_addname(cJSON* snon_object, const char* field, const char* lang, const char* name);
-    void    string_replace_char(char* string, char find_byte, char replace_byte);
 
     // HTTP transport routines
     int32_t socket_send(int32_t socket_fd, const char* data);
@@ -179,9 +178,6 @@ Local functions
 
     // ASDFG-C 6.18 VIOLATION: POSIX sigaction handler signature requires int signum; no fixed-width alternative
     static void signal_handler(int32_t signum);
-
-    // Utility functions that should be moved into common libraries
-    char* iso8601_time(char* buf, size_t len);
 
 /*
 ### Project globals
@@ -207,7 +203,7 @@ Global variables
     // measurand, sensor, and series entities; unit is the SNON "meU" value.
     static const rfpdu_measurand_def_t g_measurand_defs[C_MEASURAND_COUNT] =
     {
-        { "Wattage",            "W"   },   // PowerWatts.Reading
+        { "AC Power",           "W"   },   // PowerWatts.Reading
         { "Cumulative Energy",  "kWh" }    // EnergykWh.Reading
     };
 
@@ -735,6 +731,7 @@ The following artefacts are produced under `snon_path`:
         cJSON*      snon_root = NULL;
         cJSON*      entity_obj = NULL;
         char        working_string[1024] = {0};
+        char        eut_buf[C_ISO8601_LEN] = {0};
         char*       snon_output = NULL;
         size_t      output_len = 0U;
         ssize_t     bytes_written = 0;
@@ -772,6 +769,12 @@ The following artefacts are produced under `snon_path`:
             cJSON_AddItemToObjectCS(entity_obj, "eID", cJSON_CreateString(working_string));
             cJSON_AddItemToObjectCS(entity_obj, "eC",  cJSON_CreateString("device"));
             snon_addname(entity_obj, "eN", "*", "RedFish PDU");
+
+            if(NULL != iso8601_time(eut_buf, sizeof(eut_buf)))
+            {
+                cJSON_AddItemToObjectCS(entity_obj, "eUT", cJSON_CreateString(eut_buf));
+            }
+
             cJSON_AddItemToArray(snon_root, entity_obj);
 
             snon_output = cJSON_PrintUnformatted(snon_root);
@@ -867,6 +870,7 @@ Other changes to system state include:
         char        series_uuid[C_UUID_LEN] = {0};
         char        measurand_uuid[C_UUID_LEN] = {0};
         char        working_string[1024] = {0};
+        char        eut_buf[C_ISO8601_LEN] = {0};
         char*       snon_output = NULL;
         size_t      output_len = 0U;
         ssize_t     bytes_written = 0;
@@ -934,6 +938,12 @@ Other changes to system state include:
                     cJSON_AddItemToObjectCS(relation_object, "measurand", relation_array);
 
                     cJSON_AddItemToObjectCS(entity_obj, "eR", relation_object);
+
+                    if(NULL != iso8601_time(eut_buf, sizeof(eut_buf)))
+                    {
+                        cJSON_AddItemToObjectCS(entity_obj, "eUT", cJSON_CreateString(eut_buf));
+                    }
+
                     cJSON_AddItemToArray(snon_root, entity_obj);
 
                     snon_output = cJSON_PrintUnformatted(snon_root);
@@ -1045,6 +1055,15 @@ Other changes to system state include:
                 cJSON_AddItemToObjectCS(relation_object, "measurand", relation_array);
 
                 cJSON_AddItemToObjectCS(entity_obj, "eR", relation_object);
+
+                if(NULL != iso8601_time(eut_buf, sizeof(eut_buf)))
+                {
+                    cJSON_AddItemToObjectCS(entity_obj, "eUT", cJSON_CreateString(eut_buf));
+                }
+
+                // meUR and meTo are derived from C_POLL_INTERVAL_NS (23 ms)
+                cJSON_AddItemToObjectCS(entity_obj, "meUR", cJSON_CreateString("0.023"));
+                cJSON_AddItemToObjectCS(entity_obj, "meTo", cJSON_CreateString("0.23"));
                 cJSON_AddItemToArray(snon_root, entity_obj);
 
                 snon_output = cJSON_PrintUnformatted(snon_root);
@@ -1130,6 +1149,7 @@ Other changes to system state include:
         char            new_file_path[PATH_MAX + 1024] = {0};
         char            new_uuid[C_UUID_LEN] = {0};
         char            working_string[1024] = {0};
+        char            eut_buf[C_ISO8601_LEN] = {0};
         DIR*            dir_handle = NULL;
         struct dirent*  dir_entry = NULL;
         struct stat     stat_buf;
@@ -1270,6 +1290,14 @@ Other changes to system state include:
                 cJSON_AddItemToObjectCS(measurand_obj, "meU", cJSON_CreateString(measurand_unit));
                 cJSON_AddItemToObjectCS(measurand_obj, "meT", cJSON_CreateString("numeric"));
                 snon_addname(measurand_obj, "eN", "*", measurand_name);
+
+                if(NULL != iso8601_time(eut_buf, sizeof(eut_buf)))
+                {
+                    cJSON_AddItemToObjectCS(measurand_obj, "eUT", cJSON_CreateString(eut_buf));
+                }
+
+                cJSON_AddItemToObjectCS(measurand_obj, "meAq", cJSON_CreateString("sample"));
+                snon_addname(measurand_obj, "meUS", "*", measurand_unit);
                 cJSON_AddItemToArray(snon_root, measurand_obj);
 
                 snon_output = cJSON_PrintUnformatted(snon_root);
@@ -1734,44 +1762,6 @@ Creates a child JSON object containing a single language-keyed string entry and 
 
         cJSON_AddItemToObjectCS(name_object, lang, cJSON_CreateString(name));
         cJSON_AddItemToObjectCS(snon_object, field, name_object);
-    }
-
-/*
-## string_replace_char
-
-Replaces every occurrence of `find_byte` within a null-terminated string with `replace_byte` in place.
-
-### Interactions
-
-| Parameter    | Direction | Type  | Description                                       |
-| ------------ | --------- | ----- | ------------------------------------------------- |
-| string       | in/out    | char* | Null-terminated string to modify in place.        |
-| find_byte    | in        | char  | Byte value to search for.                         |
-| replace_byte | in        | char  | Byte value to substitute for each occurrence.     |
-
-*/
-
-    void string_replace_char(char* string, char find_byte, char replace_byte)
-    {
-        uint32_t    string_length = 0U;
-        uint32_t    index = 0U;
-
-        REQUIRES(NULL != string, "NULL value passed for string");
-        REQUIRES('\0' != replace_byte, "replace_byte must not be the null terminator");
-
-        string_length = strlen(string);
-
-        while(index < string_length)
-        {
-            if(string[index] == find_byte)
-            {
-                string[index] = replace_byte;
-            }
-
-            index = index + 1U;
-        }
-
-        ENSURES(strlen(string) == string_length, "String length changed unexpectedly: expected %zu, got %zu", string_length, strlen(string));
     }
 
 /*
@@ -2564,42 +2554,6 @@ Used by `rfpdu_connect` to build the HTTP Basic Authentication credential string
         output[out_pos] = '\0';
 
         return(C_SUCCESS);
-    }
-
-/*
-## Format the current UTC time as an ISO 8601 microsecond-precision string
-
-Reads the current real-time clock via clock_gettime(CLOCK_REALTIME), converts the result to broken-down UTC time using gmtime_r, and writes a null-terminated timestamp string in the format `YYYY-MM-DDTHH:MM:SS.ffffffZ` into the caller-supplied buffer.
-
-### Interactions
-
-| Parameter    | Direction | Type   | Description                                                                     |
-| ------------ | --------- | ------ | ------------------------------------------------------------------------------- |
-| buf          | out       | char*  | Caller-allocated buffer; must be at least `C_ISO8601_LEN` (28) bytes.           |
-| len          | in        | size_t | Byte length of buf.                                                             |
-| return value | out       | char*  | Pointer to buf on success; NULL on error.                                       |
-
-*/
-
-    char* iso8601_time(char* buf, size_t len)
-    {
-        struct timespec     ts = {0};
-        struct tm           utc_time = {0};
-        char*               iso_time_string = NULL;
-
-        REQUIRES(NULL != buf, "NULL pointer passed for buf");
-        REQUIRES(len >= C_ISO8601_LEN, "Buffer length %zu is smaller than required %u", len, C_ISO8601_LEN);
-
-        if(0 == clock_gettime(CLOCK_REALTIME, &ts))
-        {
-            if(NULL != gmtime_r(&ts.tv_sec, &utc_time))
-            {
-                snprintf(buf, len, "%04d-%02d-%02dT%02d:%02d:%02d.%06ldZ", utc_time.tm_year + 1900, utc_time.tm_mon  + 1, utc_time.tm_mday, utc_time.tm_hour, utc_time.tm_min, utc_time.tm_sec, (long) (ts.tv_nsec / 1000u));
-                iso_time_string = buf;
-            }
-        }
-
-        return(iso_time_string);
     }
 
 /*
